@@ -1,0 +1,58 @@
+# ----------------------------
+# Python / venvs / build noise
+# ----------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+*.log
+*.sqlite3
+*.db
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# ----------------------------
+# Streamlit
+# ----------------------------
+# Local config / secrets
+**/.streamlit/secrets.toml
+
+# ----------------------------
+# FastAPI / data cache
+# ----------------------------
+.meter_cache/
+*.parquet
+
+# ----------------------------
+# Data — too big for git
+# ----------------------------
+# Entire data folders
+data/
+meter/
+BESS/
+zipped/
+
+# Allow example/sample data if you want to keep tiny test files
+!data/sample*/**
+!meter/sample*/**
+!BESS/sample*/**
+
+# ----------------------------
+# IDE / editor
+# ----------------------------
+.vscode/
+.idea/
+*.iml

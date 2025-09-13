@@ -34,6 +34,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 import uvloop
 
+# Import cell analyzer
+import sys
+sys.path.append('..')
+from cell_analyzer import CellAnalyzer, PackHealthSummary, CellMetrics
+
 # ---------------- Runtime config ----------------
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -46,6 +51,9 @@ CACHE_TTL = int(os.environ.get("CACHE_TTL", "300"))  # seconds
 MAX_MEMORY_CACHE_SIZE = 128
 
 thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+# Initialize cell analyzer
+cell_analyzer = CellAnalyzer()
 
 
 # ---------------- Small TTL caches ----------------
@@ -372,6 +380,37 @@ class SeriesResponse(BaseModel):
     actual_start: Optional[str] = None
     actual_end: Optional[str] = None
 
+# Cell analyzer response models
+class CellMetricsResponse(BaseModel):
+    cell_id: str
+    pack_id: int
+    cell_num: int
+    voltage_mean: float
+    voltage_std: float
+    voltage_min: float
+    voltage_max: float
+    degradation_rate: float
+    imbalance_score: float
+    temp_max: float
+    data_points: int
+    data_quality: float
+
+class PackHealthResponse(BaseModel):
+    pack_id: int
+    bess_system: str
+    pack_soh: float
+    average_voltage: float
+    voltage_imbalance: float
+    avg_temperature: float
+    degradation_rate: float
+    worst_cell: str
+    best_cell: str
+    healthy_cells: int
+    warning_cells: int
+    critical_cells: int
+    discharge_cycles: int
+    usage_pattern: str
+
 
 # ---------------- Endpoints ----------------
 @app.get("/")
@@ -498,6 +537,224 @@ async def cache_validate():
                 else:
                     ok += 1
     return {"csv_total": total, "ok": ok, "missing": missing}
+
+
+# ---------------- Cell Analyzer Endpoints ----------------
+@app.get("/cell/pack/{bess_system}/{pack_id}/health", response_model=PackHealthResponse)
+async def get_pack_health(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Get comprehensive health analysis for a specific pack"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        summary, _ = await _run_in_thread(
+            cell_analyzer.analyze_pack_health,
+            bess_system, pack_id, start_dt, end_dt
+        )
+        return PackHealthResponse(
+            pack_id=summary.pack_id,
+            bess_system=summary.bess_system,
+            pack_soh=summary.pack_soh,
+            average_voltage=summary.average_voltage,
+            voltage_imbalance=summary.voltage_imbalance,
+            avg_temperature=summary.avg_temperature,
+            degradation_rate=summary.degradation_rate,
+            worst_cell=summary.worst_cell,
+            best_cell=summary.best_cell,
+            healthy_cells=summary.healthy_cells,
+            warning_cells=summary.warning_cells,
+            critical_cells=summary.critical_cells,
+            discharge_cycles=summary.discharge_cycles,
+            usage_pattern=summary.usage_pattern
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Pack health analysis failed: {e}")
+
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/cells")
+async def get_pack_cells(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Get detailed metrics for all cells in a pack"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        _, cell_metrics = await _run_in_thread(
+            cell_analyzer.analyze_pack_health,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        cells = []
+        for cell in cell_metrics:
+            cells.append(CellMetricsResponse(
+                cell_id=cell.cell_id,
+                pack_id=cell.pack_id,
+                cell_num=cell.cell_num,
+                voltage_mean=cell.voltage_mean,
+                voltage_std=cell.voltage_std,
+                voltage_min=cell.voltage_min,
+                voltage_max=cell.voltage_max,
+                degradation_rate=cell.degradation_rate,
+                imbalance_score=cell.imbalance_score,
+                temp_max=cell.temp_max,
+                data_points=cell.data_points,
+                data_quality=cell.data_quality
+            ))
+
+        return {"bess_system": bess_system, "pack_id": pack_id, "cells": cells}
+    except Exception as e:
+        raise HTTPException(500, f"Cell analysis failed: {e}")
+
+
+@app.get("/cell/system/{bess_system}/comparison")
+async def get_pack_comparison(
+    bess_system: str,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Compare health across all 5 packs in a BESS system"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        pack_summaries = await _run_in_thread(
+            cell_analyzer.compare_packs_degradation,
+            bess_system, start_dt, end_dt
+        )
+
+        comparison = {}
+        for pack_id, summary in pack_summaries.items():
+            comparison[f"pack_{pack_id}"] = PackHealthResponse(
+                pack_id=summary.pack_id,
+                bess_system=summary.bess_system,
+                pack_soh=summary.pack_soh,
+                average_voltage=summary.average_voltage,
+                voltage_imbalance=summary.voltage_imbalance,
+                avg_temperature=summary.avg_temperature,
+                degradation_rate=summary.degradation_rate,
+                worst_cell=summary.worst_cell,
+                best_cell=summary.best_cell,
+                healthy_cells=summary.healthy_cells,
+                warning_cells=summary.warning_cells,
+                critical_cells=summary.critical_cells,
+                discharge_cycles=summary.discharge_cycles,
+                usage_pattern=summary.usage_pattern
+            )
+
+        return {"bess_system": bess_system, "packs": comparison}
+    except Exception as e:
+        raise HTTPException(500, f"Pack comparison failed: {e}")
+
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/anomalies")
+async def get_anomalous_cells(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Detect cells with anomalous behavior"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        anomalous_cells = await _run_in_thread(
+            cell_analyzer.detect_anomalous_cells,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        anomalies = []
+        for cell in anomalous_cells:
+            cell_data = CellMetricsResponse(
+                cell_id=cell.cell_id,
+                pack_id=cell.pack_id,
+                cell_num=cell.cell_num,
+                voltage_mean=cell.voltage_mean,
+                voltage_std=cell.voltage_std,
+                voltage_min=cell.voltage_min,
+                voltage_max=cell.voltage_max,
+                degradation_rate=cell.degradation_rate,
+                imbalance_score=cell.imbalance_score,
+                temp_max=cell.temp_max,
+                data_points=cell.data_points,
+                data_quality=cell.data_quality
+            )
+
+            # Add anomaly reasons if available
+            anomaly_info = {
+                "cell": cell_data,
+                "severity_score": abs(cell.degradation_rate) * 1000 + cell.imbalance_score * 10,
+                "reasons": getattr(cell, 'anomaly_reasons', [])
+            }
+            anomalies.append(anomaly_info)
+
+        return {
+            "bess_system": bess_system,
+            "pack_id": pack_id,
+            "anomalous_cells_count": len(anomalies),
+            "anomalies": anomalies
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Anomaly detection failed: {e}")
+
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/heatmap")
+async def get_cell_heatmap_data(
+    bess_system: str,
+    pack_id: int,
+    metric: str = Query("voltage", description="voltage, temperature, or degradation"),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Get 52-cell heatmap data for visualization"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        _, cell_metrics = await _run_in_thread(
+            cell_analyzer.analyze_pack_health,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        # Create 2D array for heatmap (assume 13x4 grid layout)
+        heatmap_data = []
+
+        for cell in sorted(cell_metrics, key=lambda x: x.cell_num):
+            if metric == "voltage":
+                value = cell.voltage_mean
+            elif metric == "temperature":
+                value = cell.temp_max
+            elif metric == "degradation":
+                value = abs(cell.degradation_rate) * 1000  # Convert to mV/month
+            else:
+                value = cell.imbalance_score
+
+            heatmap_data.append({
+                "cell_num": cell.cell_num,
+                "value": value,
+                "x": (cell.cell_num - 1) % 13,  # 13 cells per row
+                "y": (cell.cell_num - 1) // 13,  # 4 rows
+                "cell_id": cell.cell_id
+            })
+
+        return {
+            "bess_system": bess_system,
+            "pack_id": pack_id,
+            "metric": metric,
+            "heatmap_data": heatmap_data,
+            "dimensions": {"rows": 4, "cols": 13}
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Heatmap data generation failed: {e}")
 
 
 # ---------------- Lifecycle ----------------

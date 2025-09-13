@@ -1,444 +1,291 @@
-from __future__ import annotations
-import datetime as _dt
-import requests
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import streamlit as st
+# frontend/pages/single_api.py
+import os
+from datetime import datetime, timedelta, date
+from typing import Dict, Optional, Tuple
 
-API = st.secrets.get("API_URL", "http://localhost:8000")
+import pandas as pd
+import requests
+import streamlit as st
+import plotly.express as px
+
+API_URL = os.environ.get("API_URL", "http://127.0.0.1:8000")
+st.set_page_config(page_title="⚡ Single Meter Analysis", layout="wide")
 st.title("⚡ Single Meter Analysis")
 
-# Fetch classified meters (cached within the session)
-@st.cache_data(ttl=60)
-def _get_meters_classified():
-    try:
-        return requests.get(f"{API}/meters/classified", timeout=15).json()
-    except:
-        # Fallback to simple list
-        meters = requests.get(f"{API}/meters", timeout=15).json()
-        return {"meters": meters, "bess": []}
-
-@st.cache_data(ttl=60)
-def _get_meter_info(meter: str):
-    try:
-        return requests.get(f"{API}/meters/{meter}/info", timeout=15).json()
-    except:
-        return None
-
-try:
-    classified = _get_meters_classified()
-except Exception as e:
-    st.error(f"Cannot reach API at {API}. Set API_URL in secrets.toml.\n\n{e}")
-    st.stop()
-
-all_meters = classified.get("meters", [])
-all_bess = classified.get("bess", [])
-
-if not (all_meters or all_bess):
-    st.warning("No meters/BESS folders found by backend. Check METER_ROOTS or POST /reload.")
-    st.stop()
-
-# Meter type selection
-meter_type = st.radio("Select type:", ["Smart Meters", "BESS Systems"], horizontal=True)
-
-if meter_type == "Smart Meters":
-    available = all_meters
-    default_signals = ["com_ap", "pf", "pos_ae", "neg_ae"]
-else:
-    available = all_bess
-    default_signals = ["bms1_soc", "pcs1_ap", "aux_m_pos_ae", "aux_m_neg_ae"]
-
-if not available:
-    st.info(f"No {meter_type.lower()} found in the system.")
-    st.stop()
-
-meter = st.selectbox(f"Choose {meter_type[:-1].lower()}", available)
-
-# Get meter info for date range
-meter_info = _get_meter_info(meter)
-
-# Sidebar controls with dynamic date range
-with st.sidebar:
-    st.markdown(f"### ⚙️ Settings")
-    st.markdown(f"**Selected:** {meter.split('/')[-1]}")
-    
-    base_rule = st.selectbox("Base resample", ["5min","15min","30min","1h"], index=1)
-    cumulative = st.checkbox("Energy files are cumulative", value=True)
-    
-    # Dynamic date range based on actual data
-    if meter_info and meter_info.get("date_range", {}).get("start"):
-        data_start = pd.Timestamp(meter_info["date_range"]["start"]).date()
-        data_end = pd.Timestamp(meter_info["date_range"]["end"]).date()
-        st.caption(f"Data available: {data_start} to {data_end}")
-        
-        # Default to last 7 days of available data
-        default_start = max(data_start, data_end - _dt.timedelta(days=7))
-        dr = st.date_input(
-            "Date range", 
-            (default_start, data_end),
-            min_value=data_start,
-            max_value=data_end
-        )
-    else:
-        today = _dt.date.today()
-        dr = st.date_input("Date range", (today - _dt.timedelta(days=7), today))
-    
-    max_points = st.slider("Max points/trace", 2000, 20000, 6000, 1000)
-    
-    if meter_info:
-        st.caption(f"📊 {meter_info.get('signal_count', 0)} signals available")
-
-# Signal selection based on meter type
-if meter_type == "Smart Meters":
-    AVAILABLE_SIGNALS = ["com_ap", "pf", "pos_ae", "neg_ae", "com_ae"]
-else:
-    AVAILABLE_SIGNALS = [
-        "bms1_soc", "bms1_soh", "bms1_v", "bms1_c",
-        "pcs1_ap", "pcs1_dcc", "pcs1_dcv",
-        "aux_m_ap", "aux_m_pos_ae", "aux_m_neg_ae",
-        "ac1_outside_t", "dh1_temp"
-    ]
-
-signals = st.multiselect(
-    "Signals to display",
-    AVAILABLE_SIGNALS,
-    default=default_signals,
-    help=f"Available signals for {meter_type.lower()}"
-)
-
-def _date_params():
-    p = {}
-    if len(dr) >= 1:
-        p["start"] = pd.Timestamp(dr[0]).date().isoformat()
-    if len(dr) == 2:
-        p["end"] = pd.Timestamp(dr[1]).date().isoformat()
-    return p
-
-@st.cache_data(show_spinner=False, ttl=60)
-def _bundle(meter: str, signals: tuple[str, ...], base_rule: str, cumulative: bool, dr: tuple[str|None, str|None], max_points: int):
-    params = {
-        "meter": meter,
-        "signals": ",".join(signals),
-        "rule": base_rule,
-        "cumulative": str(cumulative).lower(),
-        "max_points": max_points,
-    }
-    if dr[0]: params["start"] = dr[0]
-    if dr[1]: params["end"] = dr[1]
-    r = requests.get(f"{API}/bundle", params=params, timeout=180)
+# ---------------- HTTP ----------------
+def _req(path: str, params: dict | None = None) -> dict:
+    r = requests.get(f"{API_URL}{path}", params=params, timeout=30)
     r.raise_for_status()
     return r.json()
 
-dates = (_date_params().get("start"), _date_params().get("end"))
+@st.cache_data(ttl=60)
+def meters_classified() -> dict:
+    return _req("/meters/classified")
 
-if st.button("🔄 Load Data", type="primary"):
-    st.session_state.load_data = True
+@st.cache_data(ttl=60)
+def meter_info(meter: str) -> dict:
+    return _req(f"/meters/{meter}/info")
 
-if not st.session_state.get("load_data"):
-    st.info("Click 'Load Data' to fetch and display the selected signals.")
+def load_series(meter: str, signal: str, start: Optional[date], end: Optional[date], max_points=6000):
+    params = {"meter": meter, "signal": signal, "max_points": max_points}
+    if start: params["start"] = datetime.combine(start, datetime.min.time()).isoformat()
+    if end:   params["end"]   = datetime.combine(end,   datetime.max.time()).isoformat()
+    data = _req("/series", params=params)
+
+    # Force UTC-aware timestamps to avoid tz conversion errors later
+    ts = pd.to_datetime(pd.Series(data["timestamps"]), errors="coerce", utc=True)
+
+    df = pd.DataFrame({
+        "timestamp": ts,
+        "value": pd.to_numeric(pd.Series(data["values"]), errors="coerce"),
+    }).dropna(subset=["timestamp"]).sort_values("timestamp")
+
+    meta = {
+        "rule": data.get("rule"),
+        "count": data.get("count", 0),
+        "actual_start": pd.to_datetime(data.get("actual_start"), utc=True) if data.get("actual_start") else None,
+        "actual_end":   pd.to_datetime(data.get("actual_end"),   utc=True) if data.get("actual_end")   else None,
+    }
+    return df, meta
+
+# ---------------- Units, labels & formatting ----------------
+SIG_UNITS = {"com_ap": "kW", "pf": "–", "com_ae": "kWh", "pos_ae": "kWh", "neg_ae": "kWh"}
+SIG_LABELS = {
+    "com_ap": "Power",
+    "pf": "Power Factor",
+    "com_ae": "Energy (interval)",
+    "pos_ae": "Energy Import (interval)",
+    "neg_ae": "Energy Export (interval)",
+}
+ENERGY_SIGS = {"com_ae", "pos_ae", "neg_ae"}
+
+def auto_scale(sig: str, series: pd.Series) -> Tuple[float, str]:
+    unit = SIG_UNITS.get(sig, "")
+    if unit == "–" or series.empty:
+        return 1.0, unit
+    vmax = float(pd.to_numeric(series, errors="coerce").abs().max() or 0.0)
+    if unit == "kW":  return (1000.0, "MW") if vmax >= 1000 else (1.0, "kW")
+    if unit == "kWh": return (1000.0, "MWh") if vmax >= 1000 else (1.0, "kWh")
+    return 1.0, unit
+
+def dynamic_decimals(series) -> int:
+    """
+    Accepts a pandas Series *or* DataFrame; returns sensible decimals.
+    """
+    if isinstance(series, pd.DataFrame):
+        if "display_value" in series.columns:
+            series = series["display_value"]
+        else:
+            series = series.iloc[:, 0]
+    series = pd.to_numeric(series, errors="coerce")
+    if series.dropna().empty:
+        return 2
+    vmax = float(series.abs().max())
+    if vmax >= 1000: return 0
+    if vmax >= 100:  return 1
+    if vmax >= 10:   return 1
+    if vmax >= 1:    return 2
+    return 3
+
+def fmt_number(x: float, decimals: int, unit: str) -> str:
+    if x is None or pd.isna(x): return "—"
+    s = f"{x:,.{decimals}f}"
+    return (s if unit in ("–","") else f"{s} {unit}").strip()
+
+def stats_for(series: pd.Series) -> Dict[str, float]:
+    s = pd.to_numeric(series, errors="coerce")
+    if s.dropna().empty:
+        return {k: float("nan") for k in ["count","mean","min","max","std","p50","p95","sum"]}
+    return {
+        "count": int(s.count()),
+        "mean": float(s.mean()),
+        "min": float(s.min()),
+        "max": float(s.max()),
+        "std": float(s.std()),
+        "p50": float(s.quantile(0.50)),
+        "p95": float(s.quantile(0.95)),
+        "sum": float(s.sum()),
+    }
+
+def y_title(sig: str, unit: str) -> str:
+    base = SIG_LABELS.get(sig, sig)
+    return f"{base} [{unit}]" if unit and unit != "–" else base
+
+# ---------------- Plot helpers ----------------
+PLOTLY_TEMPLATE = "plotly_white"
+MODEBAR_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToAdd": [
+        "zoom2d","pan2d","select2d","lasso2d","zoomIn2d","zoomOut2d","autoScale2d","resetScale2d"
+    ],
+}
+
+def _apply_axes(fig, y_decimals: int, unit: str):
+    tickfmt = f",.{y_decimals}f"
+    fig.update_xaxes(
+        rangeslider=dict(visible=True),
+        rangeselector=dict(buttons=[
+            dict(count=1, label="1d", step="day", stepmode="backward"),
+            dict(count=7, label="7d", step="day", stepmode="backward"),
+            dict(count=1, label="1m", step="month", stepmode="backward"),
+            dict(step="all", label="All"),
+        ]),
+        tickformatstops=[
+            dict(dtickrange=[None, 1000*60*60*24], value="%d %b %Y\n%H:%M"),
+            dict(dtickrange=[1000*60*60*24, 1000*60*60*24*30], value="%d %b %Y"),
+            dict(dtickrange=[1000*60*60*24*30, 1000*60*60*24*365], value="%b %Y"),
+            dict(dtickrange=[1000*60*60*24*365, None], value="%Y"),
+        ],
+        showspikes=True, spikemode="across", spikesnap="cursor", showgrid=True,
+    )
+    fig.update_yaxes(
+        fixedrange=False, showgrid=True,
+        tickformat=tickfmt, ticksuffix=(" " + unit) if unit and unit != "–" else None,
+        title=y_title(current_signal, unit)
+    )
+    fig.update_layout(
+        hovermode="x unified", dragmode="zoom", template=PLOTLY_TEMPLATE,
+        font=dict(size=16), margin=dict(t=60, r=20, b=60, l=70),
+    )
+    return fig
+
+def make_line(df_disp: pd.DataFrame, unit: str, title: str):
+    dec = dynamic_decimals(df_disp["display_value"])
+    tickfmt = f",.{dec}f"
+    hover = "%{x}<br>%{y:" + tickfmt + "}" + (f" {unit}" if unit and unit != "–" else "")
+    fig = px.line(
+        df_disp, x="timestamp", y="display_value",
+        title=title, labels={"timestamp":"Time", "display_value": y_title(current_signal, unit)}
+    )
+    fig.update_traces(mode="lines", line=dict(width=3), hovertemplate=hover)
+    return _apply_axes(fig, dec, unit)
+
+def make_area(df_disp: pd.DataFrame, unit: str, title: str):
+    dec = dynamic_decimals(df_disp["display_value"])
+    tickfmt = f",.{dec}f"
+    hover = "%{x}<br>%{y:" + tickfmt + "}" + (f" {unit}" if unit and unit != "–" else "")
+    fig = px.area(
+        df_disp, x="timestamp", y="display_value",
+        title=title, labels={"timestamp":"Time", "display_value": y_title(current_signal, unit)}
+    )
+    fig.update_traces(hovertemplate=hover)
+    return _apply_axes(fig, dec, unit)
+
+def make_bar(daily_disp: pd.DataFrame, unit: str, title: str):
+    """
+    Expects columns: ['timestamp', 'display_value'].
+    """
+    y_series = pd.to_numeric(daily_disp["display_value"], errors="coerce")
+    dec = dynamic_decimals(y_series)
+    tickfmt = f",.{dec}f"
+    hover = "%{x}<br>%{y:" + tickfmt + "}" + (f" {unit}" if unit and unit != "–" else "")
+    fig = px.bar(
+        daily_disp, x="timestamp", y="display_value",
+        title=title,
+        labels={"timestamp": "Time",
+                "display_value": f"Daily total [{unit}]" if unit and unit != "–" else "Daily total"},
+    )
+    fig.update_traces(hovertemplate=hover)
+    return _apply_axes(fig, dec, unit)
+
+# ---------------- Sidebar controls ----------------
+classified = meters_classified()
+meter_names = sorted(list(classified.get("meters", {}).keys()))
+if not meter_names:
+    st.warning("No classic meters found. (BESS systems are on the BESS page.)")
     st.stop()
 
-try:
-    with st.spinner("Fetching data..."):
-        bundle = _bundle(meter, tuple(signals), base_rule, cumulative, dates, max_points)
-except Exception as e:
-    st.error(f"Data request failed. Try shorter date range or fewer signals.\n\n{e}")
-    st.stop()
+st.sidebar.header("Controls")
+meter = st.sidebar.selectbox("Meter", meter_names)
+info = meter_info(meter)
+prefer = [s for s in ("com_ap","pf","pos_ae","neg_ae","com_ae") if s in info.get("signals", [])]
+signals = prefer or info.get("signals", [])
+current_signal = st.sidebar.selectbox("Signal", sorted(signals))
 
-# Display KPIs
-kpis = bundle["kpis"]
-fmt = lambda v, d="–": (f"{v:,.2f}" if v is not None else d)
-
-st.markdown("### 📈 Key Performance Indicators")
-c1,c2,c3,c4,c5 = st.columns(5)
-
-if meter_type == "Smart Meters":
-    c1.metric("Import kWh", fmt(kpis.get("total_import_kWh")))
-    c2.metric("Export kWh", fmt(kpis.get("total_export_kWh")))
-    c3.metric("Net kWh", fmt(kpis.get("net_kWh")))
-    c4.metric("Peak kW", fmt(kpis.get("peak_kW")))
-    c5.metric("Avg PF", f"{kpis.get('avg_pf'):.3f}" if kpis.get("avg_pf") is not None else "–")
+# Probe available range
+probe_df, probe_meta = load_series(meter, current_signal, None, None, 1000)
+if not probe_df.empty:
+    min_d = (probe_meta["actual_start"].date() if probe_meta["actual_start"] is not None else probe_df["timestamp"].min().date())
+    max_d = (probe_meta["actual_end"].date()   if probe_meta["actual_end"]   is not None else probe_df["timestamp"].max().date())
 else:
-    # For BESS, show different KPIs if available
-    c1.metric("Import kWh", fmt(kpis.get("total_import_kWh")))
-    c2.metric("Export kWh", fmt(kpis.get("total_export_kWh")))
-    c3.metric("Net kWh", fmt(kpis.get("net_kWh")))
-    c4.metric("Peak kVA", fmt(kpis.get("peak_kW")))  # Actually kVA for BESS
-    c5.metric("Efficiency", "–")  # Placeholder
+    today = datetime.now().date(); min_d, max_d = today - timedelta(days=7), today
 
-def df_from_series(js: dict|None) -> pd.DataFrame:
-    if not js or not js.get("timestamps"):
-        return pd.DataFrame(columns=["t","v"])
-    ts = pd.to_datetime(js["timestamps"])
-    vals = np.array(js["values"], dtype="float32")
-    return pd.DataFrame({"t": ts, "v": vals})
+preset = st.sidebar.selectbox("Range", ["Last 24h", "Last 7d", "Last 30d", "All available", "Custom"], index=1)
+if preset == "Last 24h":
+    start_sel, end_sel = max_d - timedelta(days=1), max_d
+elif preset == "Last 7d":
+    start_sel, end_sel = max_d - timedelta(days=7), max_d
+elif preset == "Last 30d":
+    start_sel, end_sel = max_d - timedelta(days=30), max_d
+elif preset == "All available":
+    start_sel, end_sel = min_d, max_d
+else:
+    dates = st.sidebar.date_input("Custom dates", (max(min_d, max_d - timedelta(days=7)), max_d),
+                                  min_value=min_d, max_value=max_d, format="YYYY-MM-DD")
+    start_sel, end_sel = (dates if isinstance(dates, tuple) else (dates, dates))
+start_sel = max(min_d, min(start_sel, max_d))
+end_sel   = max(min_d, min(end_sel,   max_d))
 
-# Create tabs for different signal categories
-if meter_type == "Smart Meters":
-    tabs = st.tabs(["⚡ Power", "📊 Power Factor", "📈 Energy"])
-    
-    with tabs[0]:
-        # Power plot
-        if "com_ap" in signals:
-            ap = df_from_series(bundle["series"].get("com_ap"))
-            if not ap.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=ap["t"], y=ap["v"],
-                    mode='lines',
-                    name='Power (kW)',
-                    line=dict(color='#1f77b4', width=1.5)
-                ))
-                fig.update_layout(
-                    title="Active Power",
-                    xaxis_title="Time",
-                    yaxis_title="Power (kW)",
-                    hovermode='x unified',
-                    margin=dict(l=50,r=20,t=40,b=40),
-                    height=400
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No power data available for selected range.")
-        else:
-            st.info("Select 'com_ap' signal to view power data.")
-    
-    with tabs[1]:
-        # Power Factor plot
-        if "pf" in signals:
-            pf = df_from_series(bundle["series"].get("pf"))
-            if not pf.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=pf["t"], y=pf["v"],
-                    mode='lines',
-                    name='Power Factor',
-                    line=dict(color='#ff7f0e', width=1.5)
-                ))
-                fig.update_layout(
-                    title="Power Factor",
-                    xaxis_title="Time",
-                    yaxis_title="PF",
-                    yaxis=dict(range=[0, 1.05]),
-                    hovermode='x unified',
-                    margin=dict(l=50,r=20,t=40,b=40),
-                    height=400
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No power factor data available.")
-        else:
-            st.info("Select 'pf' signal to view power factor data.")
-    
-    with tabs[2]:
-        # Energy bar chart
-        st.markdown("#### Daily Energy Consumption")
-        daily = pd.DataFrame(index=pd.DatetimeIndex([]))
-        
-        series_map = {
-            "pos_ae": "Import",
-            "neg_ae": "Export",
-            "com_ae": "Combined"
-        }
-        
-        for k, lbl in series_map.items():
-            if k in signals:
-                s = df_from_series(bundle["series"].get(k))
-                if not s.empty:
-                    d = s.set_index("t")["v"].resample("1d").sum(min_count=1)
-                    daily = daily.join(d.rename(lbl), how="outer")
-        
+y_mode = st.sidebar.radio("Y-axis", ["Auto", "Clip 1–99%", "Manual"], index=0, horizontal=False)
+y_manual = None
+if y_mode == "Manual":
+    c1, c2 = st.sidebar.columns(2)
+    y_min = c1.number_input("y min", value=0.0)
+    y_max = c2.number_input("y max", value=1.0)
+    if y_min < y_max:
+        y_manual = [float(y_min), float(y_max)]
+
+# ---------------- Content ----------------
+df, meta = load_series(meter, current_signal, start_sel, end_sel, 6000)
+st.caption(
+    f"Rule: {meta['rule']} · Actual: "
+    f"{meta['actual_start'].date() if meta['actual_start'] else '—'} → "
+    f"{meta['actual_end'].date() if meta['actual_end'] else '—'} · Points: {meta['count']}"
+)
+
+if df.empty:
+    st.info("No data in this period.")
+else:
+    # scale & stats
+    scale, disp_unit = auto_scale(current_signal, df["value"])
+    df_disp = df.copy()
+    # Ensure numeric, scaled values
+    df_disp["display_value"] = pd.to_numeric(df_disp["value"], errors="coerce") / (scale if scale != 0 else 1.0)
+
+    stats = stats_for(df_disp["display_value"])
+    dec = dynamic_decimals(df_disp["display_value"])
+
+    a,b,c,d,e,f = st.columns(6)
+    a.metric("Mean",   fmt_number(stats["mean"], dec, disp_unit))
+    b.metric("Max",    fmt_number(stats["max"],  dec, disp_unit))
+    c.metric("Min",    fmt_number(stats["min"],  dec, disp_unit))
+    d.metric("Median", fmt_number(stats["p50"],  dec, disp_unit))
+    e.metric("p95",    fmt_number(stats["p95"],  dec, disp_unit))
+    f.metric("Sum" if current_signal in ENERGY_SIGS else "Std",
+             fmt_number(stats["sum"] if current_signal in ENERGY_SIGS else stats["std"], dec, disp_unit))
+
+    title = SIG_LABELS.get(current_signal, current_signal)
+    fig = make_area(df_disp, disp_unit, title) if current_signal in ENERGY_SIGS else make_line(df_disp, disp_unit, title)
+    if y_manual: fig.update_yaxes(range=y_manual)
+    elif y_mode == "Clip 1–99%" and not df_disp["display_value"].empty:
+        q1 = float(df_disp["display_value"].quantile(0.01)); q99 = float(df_disp["display_value"].quantile(0.99))
+        if q1 < q99: fig.update_yaxes(range=[q1, q99])
+
+    st.plotly_chart(fig, use_container_width=True, config=MODEBAR_CONFIG)
+
+    # Daily totals for energy (scaled) — timezone-safe
+    if current_signal in ENERGY_SIGS:
+        # 'timestamp' is already tz-aware (UTC). Set as index directly.
+        s_daily = (
+            df.set_index("timestamp")["value"]
+              .resample("1D").sum(min_count=1)
+        )
+        daily = s_daily.rename("value").reset_index()
         if not daily.empty:
-            daily_reset = daily.dropna(how="all").reset_index(names="Date")
-            melted = daily_reset.melt(id_vars=["Date"], var_name="Type", value_name="kWh")
-            
-            fig = go.Figure()
-            for energy_type in melted["Type"].unique():
-                data = melted[melted["Type"] == energy_type]
-                fig.add_trace(go.Bar(
-                    x=data["Date"],
-                    y=data["kWh"],
-                    name=f"{energy_type} kWh/day",
-                    text=data["kWh"].round(1),
-                    textposition='auto',
-                ))
-            
-            fig.update_layout(
-                title="Daily Energy",
-                xaxis_title="Date",
-                yaxis_title="Energy (kWh)",
-                barmode='group',
-                hovermode='x unified',
-                margin=dict(l=50,r=20,t=40,b=40),
-                height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No energy data available for selected signals.")
+            s2, u2 = auto_scale("com_ae", daily["value"])
+            daily["display_value"] = pd.to_numeric(daily["value"], errors="coerce") / (s2 if s2 != 0 else 1.0)
+            fig2 = make_bar(daily[["timestamp", "display_value"]], u2, "Daily Energy")
+            st.plotly_chart(fig2, use_container_width=True, config=MODEBAR_CONFIG)
 
-else:  # BESS Systems
-    tabs = st.tabs(["🔋 Battery Status", "⚡ Power", "🌡️ Temperature", "📊 Energy"])
-    
-    with tabs[0]:
-        # SOC/SOH plots
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if "bms1_soc" in signals:
-                soc = df_from_series(bundle["series"].get("bms1_soc"))
-                if not soc.empty:
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=soc["t"], y=soc["v"],
-                        mode='lines',
-                        name='SOC (%)',
-                        line=dict(color='#2ca02c', width=1.5),
-                        fill='tozeroy',
-                        fillcolor='rgba(44, 160, 44, 0.2)'
-                    ))
-                    fig.update_layout(
-                        title="State of Charge",
-                        xaxis_title="Time",
-                        yaxis_title="SOC (%)",
-                        yaxis=dict(range=[0, 105]),
-                        margin=dict(l=50,r=20,t=40,b=40),
-                        height=350
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("No SOC data")
-        
-        with col2:
-            if "bms1_soh" in signals:
-                soh = df_from_series(bundle["series"].get("bms1_soh"))
-                if not soh.empty:
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=soh["t"], y=soh["v"],
-                        mode='lines',
-                        name='SOH (%)',
-                        line=dict(color='#d62728', width=1.5)
-                    ))
-                    fig.update_layout(
-                        title="State of Health",
-                        xaxis_title="Time",
-                        yaxis_title="SOH (%)",
-                        yaxis=dict(range=[0, 105]),
-                        margin=dict(l=50,r=20,t=40,b=40),
-                        height=350
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("No SOH data")
-    
-    with tabs[1]:
-        # PCS Power
-        if "pcs1_ap" in signals:
-            pcs = df_from_series(bundle["series"].get("pcs1_ap"))
-            if not pcs.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=pcs["t"], y=pcs["v"],
-                    mode='lines',
-                    name='PCS Power (kVA)',
-                    line=dict(color='#9467bd', width=1.5)
-                ))
-                fig.update_layout(
-                    title="PCS Apparent Power",
-                    xaxis_title="Time",
-                    yaxis_title="Power (kVA)",
-                    hovermode='x unified',
-                    margin=dict(l=50,r=20,t=40,b=40),
-                    height=400
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No PCS power data available.")
-    
-    with tabs[2]:
-        # Temperature
-        temp_signals = ["ac1_outside_t", "dh1_temp"]
-        temp_data = []
-        for sig in temp_signals:
-            if sig in signals:
-                data = df_from_series(bundle["series"].get(sig))
-                if not data.empty:
-                    temp_data.append((sig, data))
-        
-        if temp_data:
-            fig = go.Figure()
-            for sig, data in temp_data:
-                fig.add_trace(go.Scatter(
-                    x=data["t"], y=data["v"],
-                    mode='lines',
-                    name=sig.replace("_", " ").title(),
-                    line=dict(width=1.5)
-                ))
-            fig.update_layout(
-                title="Temperature Monitoring",
-                xaxis_title="Time",
-                yaxis_title="Temperature (°C)",
-                hovermode='x unified',
-                margin=dict(l=50,r=20,t=40,b=40),
-                height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No temperature data available.")
-    
-    with tabs[3]:
-        # Auxiliary Energy
-        st.markdown("#### Auxiliary Energy Consumption")
-        daily = pd.DataFrame(index=pd.DatetimeIndex([]))
-        
-        series_map = {
-            "aux_m_pos_ae": "Aux Import",
-            "aux_m_neg_ae": "Aux Export"
-        }
-        
-        for k, lbl in series_map.items():
-            if k in signals:
-                s = df_from_series(bundle["series"].get(k))
-                if not s.empty:
-                    d = s.set_index("t")["v"].resample("1d").sum(min_count=1)
-                    daily = daily.join(d.rename(lbl), how="outer")
-        
-        if not daily.empty:
-            daily_reset = daily.dropna(how="all").reset_index(names="Date")
-            melted = daily_reset.melt(id_vars=["Date"], var_name="Type", value_name="kWh")
-            
-            fig = go.Figure()
-            for energy_type in melted["Type"].unique():
-                data = melted[melted["Type"] == energy_type]
-                fig.add_trace(go.Bar(
-                    x=data["Date"],
-                    y=data["kWh"],
-                    name=f"{energy_type} kWh/day",
-                    text=data["kWh"].round(1),
-                    textposition='auto',
-                ))
-            
-            fig.update_layout(
-                title="Daily Auxiliary Energy",
-                xaxis_title="Date",
-                yaxis_title="Energy (kWh)",
-                barmode='group',
-                hovermode='x unified',
-                margin=dict(l=50,r=20,t=40,b=40),
-                height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No auxiliary energy data available.")
-
-# Footer with data info
-st.divider()
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.caption(f"📍 Data source: {meter}")
-with col2:
-    st.caption(f"📊 Resolution: {bundle.get('series', {}).get(signals[0] if signals else '', {}).get('rule', 'N/A')}")
-with col3:
-    st.caption(f"🔽 Points: {max_points} max per series")
+with st.expander("Raw (head 200)"):
+    st.dataframe(df.head(200), use_container_width=True)

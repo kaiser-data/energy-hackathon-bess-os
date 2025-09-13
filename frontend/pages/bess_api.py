@@ -1,467 +1,284 @@
-from __future__ import annotations
-import datetime as _dt
-import requests
-import numpy as np
+# frontend/pages/bess_api.py
+import os
+from datetime import datetime, timedelta, date
+from typing import Dict, List, Optional, DefaultDict, Tuple
+from collections import defaultdict
+
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import requests
 import streamlit as st
+import plotly.express as px
 
-API = st.secrets.get("API_URL", "http://localhost:8000")
-st.title("🔋 BESS System Overview")
+API_URL = os.environ.get("API_URL", "http://127.0.0.1:8000")
+st.set_page_config(page_title="🔋 BESS Overview", layout="wide")
+st.title("🔋 BESS Overview")
 
-@st.cache_data(ttl=60)
-def _get_meters_classified():
-    try:
-        return requests.get(f"{API}/meters/classified", timeout=15).json()
-    except:
-        meters = requests.get(f"{API}/meters", timeout=15).json()
-        # Heuristic classification
-        bess = [m for m in meters if "ZHPESS" in m or "/BESS/" in m or "bess" in m.lower()]
-        return {"meters": [m for m in meters if m not in bess], "bess": bess}
-
-@st.cache_data(ttl=60)
-def _get_meter_info(meter: str):
-    try:
-        return requests.get(f"{API}/meters/{meter}/info", timeout=15).json()
-    except:
-        return None
-
-try:
-    classified = _get_meters_classified()
-except Exception as e:
-    st.error(f"Cannot reach API at {API}.\n\n{e}")
-    st.stop()
-
-bess_systems = classified.get("bess", [])
-
-if not bess_systems:
-    st.info("No BESS systems detected. BESS folders should contain 'ZHPESS' or be in a 'BESS' directory.")
-    st.stop()
-
-sel = st.selectbox("Select BESS System", bess_systems)
-
-# Get system info
-system_info = _get_meter_info(sel)
-
-with st.sidebar:
-    st.markdown("### ⚙️ BESS Settings")
-    st.markdown(f"**System:** {sel.split('/')[-1]}")
-    
-    base_rule = st.selectbox("Data Resolution", ["15min","1h"], index=1)
-    
-    # Dynamic date range
-    if system_info and system_info.get("date_range", {}).get("start"):
-        data_start = pd.Timestamp(system_info["date_range"]["start"]).date()
-        data_end = pd.Timestamp(system_info["date_range"]["end"]).date()
-        st.caption(f"Data: {data_start} to {data_end}")
-        
-        default_start = max(data_start, data_end - _dt.timedelta(days=14))
-        dr = st.date_input(
-            "Analysis Period",
-            (default_start, data_end),
-            min_value=data_start,
-            max_value=data_end
-        )
-    else:
-        today = _dt.date.today()
-        dr = st.date_input("Analysis Period", (today - _dt.timedelta(days=14), today))
-    
-    max_points = st.slider("Max points/series", 2000, 20000, 6000, 1000)
-    
-    if system_info:
-        st.caption(f"📊 {system_info.get('signal_count', 0)} signals")
-        st.caption(f"🏷️ Type: {system_info.get('type', 'unknown').upper()}")
-
-def _date_params():
-    p = {}
-    if len(dr) >= 1: p["start"] = pd.Timestamp(dr[0]).date().isoformat()
-    if len(dr) == 2: p["end"] = pd.Timestamp(dr[1]).date().isoformat()
-    return p
-
-params = {"meter": sel, "rule": base_rule} | _date_params()
-
-if st.button("🔄 Load BESS Data", type="primary"):
-    st.session_state.load_bess = True
-
-if not st.session_state.get("load_bess"):
-    st.info("Click 'Load BESS Data' to fetch system metrics and visualizations.")
-    st.stop()
-
-@st.cache_data(show_spinner=False, ttl=60)
-def _bess_kpis(params: dict):
-    r = requests.get(f"{API}/bess_kpis", params=params, timeout=120)
+# ---------------- HTTP ----------------
+def _req(path: str, params: dict | None = None) -> dict:
+    r = requests.get(f"{API_URL}{path}", params=params, timeout=30)
     r.raise_for_status()
     return r.json()
 
-try:
-    with st.spinner("Loading BESS metrics..."):
-        k = _bess_kpis(params)
-except Exception as e:
-    st.error(f"Failed to load BESS KPIs: {e}")
+@st.cache_data(ttl=60)
+def meters_classified() -> dict:
+    return _req("/meters/classified")
+
+@st.cache_data(ttl=60)
+def meter_info(meter: str) -> dict:
+    return _req(f"/meters/{meter}/info")
+
+def load_series(meter: str, signal: str, start: Optional[date], end: Optional[date], max_points=6000):
+    params = {"meter": meter, "signal": signal, "max_points": max_points}
+    if start: params["start"] = datetime.combine(start, datetime.min.time()).isoformat()
+    if end:   params["end"]   = datetime.combine(end,   datetime.max.time()).isoformat()
+    data = _req("/series", params=params)
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(pd.Series(data["timestamps"]), errors="coerce"),
+        "value": pd.Series(data["values"], dtype="float32"),
+        "signal": signal,
+    }).dropna(subset=["timestamp"]).sort_values("timestamp")
+    meta = {
+        "rule": data.get("rule"), "count": data.get("count", 0),
+        "actual_start": pd.to_datetime(data.get("actual_start")) if data.get("actual_start") else None,
+        "actual_end":   pd.to_datetime(data.get("actual_end"))   if data.get("actual_end")   else None,
+    }
+    return df, meta
+
+# ---------------- Groups & units ----------------
+GROUPS = {
+    "Battery (BMS)": [
+        "bms1_soc", "bms1_soh", "bms1_v", "bms1_c",
+        "bms1_cell_ave_v", "bms1_cell_ave_t",
+        "bms1_cell_max_v", "bms1_cell_min_v", "bms1_cell_t_diff",
+    ],
+    "PCS (Inverter)": [
+        "pcs1_ap", "pcs1_dcc", "pcs1_dcv", "pcs1_ia", "pcs1_ib", "pcs1_ic",
+        "pcs1_uab", "pcs1_ubc", "pcs1_uca", "pcs1_t_env", "pcs1_t_a", "pcs1_t_igbt",
+    ],
+    "Aux/Thermal": [
+        "aux_m_ap", "aux_m_pf", "ac1_outside_t", "ac1_outwater_t", "ac1_rtnwater_pre",
+    ],
+    "Environment/Safety": [
+        "dh1_humi", "dh1_temp"
+    ],
+}
+UNITS = {
+    "bms1_soc": "%", "bms1_soh": "%", "bms1_v": "V", "bms1_c": "A",
+    "bms1_cell_ave_v": "V", "bms1_cell_ave_t": "°C",
+    "bms1_cell_max_v": "V", "bms1_cell_min_v": "V", "bms1_cell_t_diff": "°C",
+    "pcs1_ap": "kW", "pcs1_dcc": "A", "pcs1_dcv": "V",
+    "pcs1_ia": "A", "pcs1_ib": "A", "pcs1_ic": "A",
+    "pcs1_uab": "V", "pcs1_ubc": "V", "pcs1_uca": "V",
+    "pcs1_t_env": "°C", "pcs1_t_a": "°C", "pcs1_t_igbt": "°C",
+    "aux_m_ap": "kW", "aux_m_pf": "–",
+    "ac1_outside_t": "°C", "ac1_outwater_t": "°C", "ac1_rtnwater_pre": "bar",
+    "dh1_humi": "%", "dh1_temp": "°C",
+}
+
+# ---------------- Scaling & formatting ----------------
+def unit_scale(unit: str, series: pd.Series) -> Tuple[float, str]:
+    if series.empty or unit in ("%", "°C", "bar", "–", ""):
+        return 1.0, unit
+    vmax = float(series.abs().max())
+    if unit == "kW": return (1000.0, "MW") if vmax >= 1000 else (1.0, "kW")
+    if unit == "V":  return (1000.0, "kV") if vmax >= 1000 else (1.0, "V")
+    if unit == "A":  return (1000.0, "kA") if vmax >= 1000 else (1.0, "A")
+    return 1.0, unit
+
+def dynamic_decimals(series: pd.Series) -> int:
+    if series.empty: return 2
+    vmax = float(series.abs().max())
+    if vmax >= 1000: return 0
+    if vmax >= 100:  return 1
+    if vmax >= 10:   return 1
+    if vmax >= 1:    return 2
+    return 3
+
+def fmt_value(x: float, decimals: int, unit: str) -> str:
+    if x is None or pd.isna(x): return "—"
+    s = f"{x:,.{decimals}f}"
+    return f"{s}{'' if unit in ('–','') else ' ' + unit}"
+
+# ---------------- Plot helpers ----------------
+PLOTLY_TEMPLATE = "plotly_white"
+MODEBAR_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToAdd": [
+        "zoom2d","pan2d","select2d","lasso2d","zoomIn2d","zoomOut2d","autoScale2d","resetScale2d"
+    ],
+}
+
+def apply_axes(fig, y_dec: int, unit: str):
+    tickfmt = f",.{y_dec}f"
+    fig.update_xaxes(
+        rangeslider=dict(visible=True),
+        rangeselector=dict(buttons=[
+            dict(count=1, label="1d", step="day", stepmode="backward"),
+            dict(count=7, label="7d", step="day", stepmode="backward"),
+            dict(count=1, label="1m", step="month", stepmode="backward"),
+            dict(step="all", label="All"),
+        ]),
+        tickformatstops=[
+            dict(dtickrange=[None, 1000*60*60*24], value="%d %b %Y\n%H:%M"),
+            dict(dtickrange=[1000*60*60*24, 1000*60*60*24*30], value="%d %b %Y"),
+            dict(dtickrange=[1000*60*60*24*30, 1000*60*60*24*365], value="%b %Y"),
+            dict(dtickrange=[1000*60*60*24*365, None], value="%Y"),
+        ],
+        showspikes=True, spikemode="across", spikesnap="cursor", showgrid=True,
+    )
+    fig.update_yaxes(
+        fixedrange=False, showgrid=True,
+        tickformat=tickfmt, ticksuffix=(" " + unit) if unit and unit != "–" else None,
+    )
+    fig.update_layout(
+        hovermode="x unified", dragmode="zoom", template=PLOTLY_TEMPLATE,
+        font=dict(size=16), margin=dict(t=60, r=20, b=60, l=70),
+    )
+    return fig
+
+def multi_line_scaled(dfu: pd.DataFrame, unit: str, title: str):
+    dec = dynamic_decimals(dfu["display_value"])
+    tickfmt = f",.{dec}f"
+    hover = "%{x}<br>%{fullData.name}: %{y:" + tickfmt + "}" + (f" {unit}" if unit and unit != "–" else "")
+    fig = px.line(
+        dfu, x="timestamp", y="display_value", color="signal",
+        title=title, labels={"timestamp":"Time", "display_value": f"Value [{unit}]" if unit and unit != "–" else "Value"}
+    )
+    fig.update_traces(mode="lines", line=dict(width=3), hovertemplate=hover)
+    return apply_axes(fig, dec, unit)
+
+def summarize_formatted(dfu: pd.DataFrame, unit: str) -> pd.DataFrame:
+    if dfu.empty:
+        return pd.DataFrame(columns=["signal","count","mean","min","max","std","p50","p95"])
+    g = dfu.groupby("signal")["display_value"]
+    raw = pd.DataFrame({
+        "count": g.count().astype(int),
+        "mean": g.mean(),
+        "min": g.min(),
+        "max": g.max(),
+        "std": g.std(),
+        "p50": g.quantile(0.5),
+        "p95": g.quantile(0.95),
+    }).reset_index()
+    dec = dynamic_decimals(dfu["display_value"])
+    for c in ["mean","min","max","std","p50","p95"]:
+        raw[c] = raw[c].map(lambda x: fmt_value(x, dec, unit))
+    return raw[["signal","count","mean","min","max","std","p50","p95"]].sort_values("signal")
+
+def values_table_formatted(dfu: pd.DataFrame, unit: str, max_rows: int = 500) -> pd.DataFrame:
+    if dfu.empty:
+        return pd.DataFrame(columns=["timestamp","signal","value"])
+    dec = dynamic_decimals(dfu["display_value"])
+    out = dfu[["timestamp","signal","display_value"]].copy().sort_values(["timestamp","signal"]).head(max_rows)
+    out["value"] = out["display_value"].map(lambda x: fmt_value(x, dec, unit))
+    return out.drop(columns=["display_value"])
+
+# ---------------- Sidebar controls ----------------
+classified = meters_classified()
+bess_names = sorted(list(classified.get("bess", {}).keys()))
+if not bess_names:
+    st.warning("No BESS systems detected.")
     st.stop()
 
-fmt = lambda v, d="–": (f"{v:,.2f}" if v is not None else d)
+st.sidebar.header("Controls")
+meter = st.sidebar.selectbox("BESS System", bess_names)
+info = meter_info(meter)
+available = set(info.get("signals", []))
 
-# Display KPIs
-st.markdown("### 🎯 System Health Metrics")
+# bounds by probing a robust signal
+probe_sig = next((s for s in ["bms1_soc","pcs1_ap","bms1_v"] if s in available), (sorted(available)[0] if available else None))
+probe_df, probe_meta = (load_series(meter, probe_sig, None, None, 1000) if probe_sig else (pd.DataFrame(), {}))
+if not probe_df.empty:
+    min_d = (probe_meta["actual_start"].date() if probe_meta.get("actual_start") is not None else probe_df["timestamp"].min().date())
+    max_d = (probe_meta["actual_end"].date()   if probe_meta.get("actual_end")   is not None else probe_df["timestamp"].max().date())
+else:
+    today = datetime.now().date(); min_d, max_d = today - timedelta(days=7), today
 
-# Battery status row
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("SOC Average", f"{fmt(k.get('soc_avg'))}%", 
-           delta=f"Min: {fmt(k.get('soc_min'))}%" if k.get('soc_min') else None)
-col2.metric("SOH Average", f"{fmt(k.get('soh_avg'))}%")
-col3.metric("Pack Voltage", f"{fmt(k.get('pack_v_avg'))} V")
-col4.metric("Pack Current", f"{fmt(k.get('pack_c_avg'))} A")
+preset = st.sidebar.selectbox("Range", ["Last 24h", "Last 7d", "Last 30d", "All available", "Custom"], index=1)
+if preset == "Last 24h":
+    start_sel, end_sel = max_d - timedelta(days=1), max_d
+elif preset == "Last 7d":
+    start_sel, end_sel = max_d - timedelta(days=7), max_d
+elif preset == "Last 30d":
+    start_sel, end_sel = max_d - timedelta(days=30), max_d
+elif preset == "All available":
+    start_sel, end_sel = min_d, max_d
+else:
+    dates = st.sidebar.date_input("Custom dates", (max(min_d, max_d - timedelta(days=7)), max_d),
+                                  min_value=min_d, max_value=max_d, format="YYYY-MM-DD")
+    start_sel, end_sel = (dates if isinstance(dates, tuple) else (dates, dates))
+start_sel = max(min_d, min(start_sel, max_d))
+end_sel   = max(min_d, min(end_sel,   max_d))
 
-# Performance row
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("PCS Peak Power", f"{fmt(k.get('pcs_ap_peak'))} kVA")
-col2.metric("Aux Power Avg", f"{fmt(k.get('aux_ap_avg'))} kW")
-col3.metric("Cell ΔV Max", f"{fmt(k.get('cell_v_spread_max'))} V")
-col4.metric("Cell Temp Avg", f"{fmt(k.get('cell_t_avg'))}°C")
+# group & signals in sidebar
+groups_with_availability = {g: [s for s in sigs if s in available] for g, sigs in GROUPS.items()}
+dyn_safety = [s for s in available if s.lower().startswith("fa") or "flag" in s.lower() or "err" in s.lower()]
+if dyn_safety:
+    groups_with_availability["Safety/Flags"] = sorted(dyn_safety)
 
-# Environment & Alarms
-col1, col2 = st.columns(2)
-col1.metric("Environment Temp", f"{fmt(k.get('env_temp_avg'))}°C")
-alarm_status = "⚠️ ACTIVE" if k.get("alarms_any") else "✅ None"
-col2.metric("Alarm Status", alarm_status)
+group = st.sidebar.selectbox("Sensor group", [g for g, sigs in groups_with_availability.items() if sigs])
+candidates = groups_with_availability[group]
+default_pick = candidates[:3] if candidates else []
+picked = st.sidebar.multiselect("Signals", candidates, default=default_pick, key=f"{meter}-{group}")
 
-st.divider()
+y_mode = st.sidebar.radio("Y-axis (per chart)", ["Auto", "Clip 1–99%", "Manual"], index=0)
+y_manual = {}
+if y_mode == "Manual":
+    # Manual per-unit once we know the units (we’ll ask later when rendering)
+    st.sidebar.caption("Set ranges below each chart.")
 
-# Detailed visualizations
-st.markdown("### 📊 Detailed Analysis")
+# ---------------- Content ----------------
+st.caption("Pick system, range, and signals in the sidebar.")
 
-@st.cache_data(show_spinner=False, ttl=60)
-def fetch_series(signal: str, meter: str, params: dict):
-    p = {"meter": meter, "signal": signal, "max_points": max_points} | params
-    try:
-        r = requests.get(f"{API}/series", params=p, timeout=180)
-        if r.status_code != 200:
-            return None
-        js = r.json()
-        if not js["timestamps"]:
-            return None
-        return pd.DataFrame({
-            "t": pd.to_datetime(js["timestamps"]),
-            "v": np.array(js["values"], dtype="float32")
-        })
-    except:
-        return None
+if not picked:
+    st.info("Select one or more signals to plot.")
+else:
+    frames: List[pd.DataFrame] = []
+    for sig in picked:
+        df, _ = load_series(meter, sig, start_sel, end_sel, 6000)
+        if not df.empty:
+            df["signal"] = sig
+            df["unit"] = UNITS.get(sig, "")
+            frames.append(df)
 
-# Create tabs for different aspects
-tabs = st.tabs(["🔋 Battery State", "⚡ Power Flow", "🌡️ Thermal", "📈 Energy", "⚠️ Diagnostics"])
-
-with tabs[0]:
-    # Battery State (SOC/SOH/Voltage/Current)
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        soc = fetch_series("bms1_soc", sel, params)
-        if soc is not None and not soc.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=soc["t"], y=soc["v"],
-                mode='lines',
-                name='SOC',
-                line=dict(color='#2ca02c', width=2),
-                fill='tozeroy',
-                fillcolor='rgba(44, 160, 44, 0.1)'
-            ))
-            fig.update_layout(
-                title="State of Charge (%)",
-                xaxis_title="Time",
-                yaxis_title="SOC (%)",
-                yaxis=dict(range=[0, 105]),
-                margin=dict(l=50,r=20,t=40,b=40),
-                height=350,
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No SOC data available")
-    
-    with col2:
-        soh = fetch_series("bms1_soh", sel, params)
-        if soh is not None and not soh.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=soh["t"], y=soh["v"],
-                mode='lines',
-                name='SOH',
-                line=dict(color='#ff7f0e', width=2)
-            ))
-            fig.update_layout(
-                title="State of Health (%)",
-                xaxis_title="Time",
-                yaxis_title="SOH (%)",
-                yaxis=dict(range=[90, 105]),
-                margin=dict(l=50,r=20,t=40,b=40),
-                height=350,
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No SOH data available")
-    
-    # Voltage and Current
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        voltage = fetch_series("bms1_v", sel, params)
-        if voltage is not None and not voltage.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=voltage["t"], y=voltage["v"],
-                mode='lines',
-                name='Pack Voltage',
-                line=dict(color='#1f77b4', width=2)
-            ))
-            fig.update_layout(
-                title="Pack Voltage",
-                xaxis_title="Time",
-                yaxis_title="Voltage (V)",
-                margin=dict(l=50,r=20,t=40,b=40),
-                height=350,
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        current = fetch_series("bms1_c", sel, params)
-        if current is not None and not current.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=current["t"], y=current["v"],
-                mode='lines',
-                name='Pack Current',
-                line=dict(color='#d62728', width=2)
-            ))
-            # Add zero line
-            fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-            fig.update_layout(
-                title="Pack Current (Charge +/Discharge -)",
-                xaxis_title="Time",
-                yaxis_title="Current (A)",
-                margin=dict(l=50,r=20,t=40,b=40),
-                height=350,
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-with tabs[1]:
-    # Power Flow
-    st.markdown("#### PCS Apparent Power")
-    pcs = fetch_series("pcs1_ap", sel, params)
-    if pcs is not None and not pcs.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=pcs["t"], y=pcs["v"],
-            mode='lines',
-            name='PCS Power',
-            line=dict(color='#9467bd', width=2)
-        ))
-        fig.update_layout(
-            title="PCS Apparent Power (kVA)",
-            xaxis_title="Time",
-            yaxis_title="Power (kVA)",
-            margin=dict(l=50,r=20,t=40,b=40),
-            height=400,
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    if not frames:
+        st.info("No data in this period for selected signals.")
     else:
-        st.info("No PCS power data available")
-    
-    # Auxiliary Power
-    st.markdown("#### Auxiliary Systems Power")
-    aux = fetch_series("aux_m_ap", sel, params)
-    if aux is not None and not aux.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=aux["t"], y=aux["v"],
-            mode='lines',
-            name='Aux Power',
-            line=dict(color='#e377c2', width=2)
-        ))
-        fig.update_layout(
-            title="Auxiliary Power Consumption",
-            xaxis_title="Time",
-            yaxis_title="Power (kW)",
-            margin=dict(l=50,r=20,t=40,b=40),
-            height=400,
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        data = pd.concat(frames, ignore_index=True)
 
-with tabs[2]:
-    # Temperature monitoring
-    st.markdown("#### Temperature Monitoring")
-    
-    temp_signals = {
-        "bms1_cell_ave_t": "Cell Average Temp",
-        "ac1_outside_t": "AC Outside Temp",
-        "dh1_temp": "Environment Temp",
-        "pcs1_t_igbt": "IGBT Temp",
-        "pcs1_t_env": "PCS Environment"
-    }
-    
-    temp_data = []
-    for sig, label in temp_signals.items():
-        data = fetch_series(sig, sel, params)
-        if data is not None and not data.empty:
-            temp_data.append((label, data))
-    
-    if temp_data:
-        fig = go.Figure()
-        colors = px.colors.qualitative.Plotly
-        for idx, (label, data) in enumerate(temp_data):
-            fig.add_trace(go.Scatter(
-                x=data["t"], y=data["v"],
-                mode='lines',
-                name=label,
-                line=dict(color=colors[idx % len(colors)], width=2)
-            ))
-        
-        fig.update_layout(
-            title="Temperature Trends",
-            xaxis_title="Time",
-            yaxis_title="Temperature (°C)",
-            margin=dict(l=50,r=20,t=40,b=40),
-            height=450,
-            hovermode='x unified',
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            )
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No temperature data available")
+        # split by unit and render
+        by_unit: DefaultDict[str, pd.DataFrame] = defaultdict(pd.DataFrame)
+        for sig in data["signal"].unique():
+            u = UNITS.get(sig, "")
+            block = data[data["signal"] == sig]
+            if u not in by_unit or by_unit[u].empty:
+                by_unit[u] = block.copy()
+            else:
+                by_unit[u] = pd.concat([by_unit[u], block], ignore_index=True)
 
-with tabs[3]:
-    # Energy accounting
-    st.markdown("#### Daily Energy Flow")
-    
-    aux_imp = fetch_series("aux_m_pos_ae", sel, params)
-    aux_exp = fetch_series("aux_m_neg_ae", sel, params)
-    
-    daily = pd.DataFrame(index=pd.DatetimeIndex([]))
-    
-    if aux_imp is not None and not aux_imp.empty:
-        d = aux_imp.set_index("t")["v"].resample("1d").sum(min_count=1)
-        daily = daily.join(d.rename("Import"), how="outer")
-    
-    if aux_exp is not None and not aux_exp.empty:
-        d = aux_exp.set_index("t")["v"].resample("1d").sum(min_count=1)
-        daily = daily.join(d.rename("Export"), how="outer")
-    
-    if not daily.empty:
-        daily_reset = daily.dropna(how="all").reset_index(names="Date")
-        melted = daily_reset.melt(id_vars=["Date"], var_name="Direction", value_name="kWh")
-        
-        fig = go.Figure()
-        colors = {"Import": "#2ca02c", "Export": "#d62728"}
-        for direction in melted["Direction"].unique():
-            data = melted[melted["Direction"] == direction]
-            fig.add_trace(go.Bar(
-                x=data["Date"],
-                y=data["kWh"],
-                name=f"{direction} (kWh/day)",
-                marker_color=colors.get(direction, "#1f77b4"),
-                text=data["kWh"].round(1),
-                textposition='auto',
-            ))
-        
-        fig.update_layout(
-            title="Daily Energy Flow",
-            xaxis_title="Date",
-            yaxis_title="Energy (kWh)",
-            barmode='group',
-            margin=dict(l=50,r=20,t=40,b=40),
-            height=400,
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Summary stats
-        col1, col2, col3 = st.columns(3)
-        if "Import" in daily.columns:
-            col1.metric("Total Import", f"{daily['Import'].sum():.1f} kWh")
-        if "Export" in daily.columns:
-            col2.metric("Total Export", f"{daily['Export'].sum():.1f} kWh")
-        if "Import" in daily.columns and "Export" in daily.columns:
-            col3.metric("Net Energy", f"{(daily['Import'].sum() - daily['Export'].sum()):.1f} kWh")
-    else:
-        st.info("No energy flow data available")
+        st.subheader(f"{meter} · {group}")
 
-with tabs[4]:
-    # Diagnostics and alarms
-    st.markdown("#### System Diagnostics")
-    
-    # Cell voltage spread
-    v_diff = fetch_series("bms1_cell_v_diff", sel, params)
-    if v_diff is not None and not v_diff.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=v_diff["t"], y=v_diff["v"],
-            mode='lines',
-            name='Cell Voltage Difference',
-            line=dict(color='#ff7f0e', width=2)
-        ))
-        # Add warning threshold
-        fig.add_hline(y=0.05, line_dash="dash", line_color="orange", 
-                     annotation_text="Warning Threshold", opacity=0.7)
-        fig.update_layout(
-            title="Cell Voltage Imbalance",
-            xaxis_title="Time",
-            yaxis_title="Voltage Difference (V)",
-            margin=dict(l=50,r=20,t=40,b=40),
-            height=350,
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Temperature spread
-    t_diff = fetch_series("bms1_cell_t_diff", sel, params)
-    if t_diff is not None and not t_diff.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=t_diff["t"], y=t_diff["v"],
-            mode='lines',
-            name='Cell Temperature Difference',
-            line=dict(color='#d62728', width=2)
-        ))
-        # Add warning threshold
-        fig.add_hline(y=5, line_dash="dash", line_color="orange", 
-                     annotation_text="Warning Threshold", opacity=0.7)
-        fig.update_layout(
-            title="Cell Temperature Imbalance",
-            xaxis_title="Time",
-            yaxis_title="Temperature Difference (°C)",
-            margin=dict(l=50,r=20,t=40,b=40),
-            height=350,
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Alarm signals check
-    st.markdown("#### Alarm History")
-    alarm_signals = ["fa1_SmokeFlag", "fa1_ErrCode", "fa1_Level", "fa1_Co", "fa1_Voc"]
-    alarm_found = False
-    
-    for sig in alarm_signals:
-        data = fetch_series(sig, sel, params)
-        if data is not None and not data.empty and (data["v"] > 0).any():
-            alarm_found = True
-            st.warning(f"⚠️ {sig}: Alarms detected in the selected period")
-    
-    if not alarm_found:
-        st.success("✅ No alarms detected in the selected period")
+        for unit, dfu in by_unit.items():
+            # scale per-unit
+            scale, disp_unit = unit_scale(unit, dfu["value"])
+            dfu = dfu.copy()
+            dfu["display_value"] = dfu["value"] / scale if scale != 1.0 else dfu["value"]
 
-# Footer
-st.divider()
-st.caption(f"📍 BESS System: **{sel.split('/')[-1]}** | 📊 Resolution: {base_rule} | 📅 Period: {dr[0] if dr else 'N/A'} to {dr[1] if len(dr) > 1 else 'N/A'}")
+            # chart
+            title = f"{group} ({disp_unit or 'various'})"
+            fig = multi_line_scaled(dfu, disp_unit, title)
+
+            # optional y-range clipping/manual
+            if y_mode == "Clip 1–99%" and not dfu["display_value"].empty:
+                q1 = float(dfu["display_value"].quantile(0.01))
+                q99 = float(dfu["display_value"].quantile(0.99))
+                if q1 < q99: fig.update_yaxes(range=[q1, q99])
+
+            st.plotly_chart(fig, use_container_width=True, config=MODEBAR_CONFIG)
+
+            # stats & formatted values below chart
+            st.caption("Statistics (selected range)")
+            st.dataframe(summarize_formatted(dfu, disp_unit), use_container_width=True)
+
+            st.caption("Values (formatted)")
+            st.dataframe(values_table_formatted(dfu, disp_unit), use_container_width=True)

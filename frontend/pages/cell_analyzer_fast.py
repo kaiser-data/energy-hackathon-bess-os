@@ -84,8 +84,8 @@ class FastAPIClient:
         self.session = requests.Session()
         self.session.headers.update({"Connection": "keep-alive"})
 
-    def _req(self, path: str, params: dict = None, timeout: int = 10) -> dict:
-        """Ultra-fast API request with connection pooling"""
+    def _req(self, path: str, params: dict = None, timeout: int = 120) -> dict:
+        """Ultra-fast API request with connection pooling and extended timeout for real data"""
         try:
             response = self.session.get(f"{API_URL}{path}", params=params, timeout=timeout)
             response.raise_for_status()

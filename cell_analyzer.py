@@ -373,6 +373,72 @@ class CellAnalyzer:
         except Exception:
             return 0
 
+    def _calculate_professional_soh(self, cell_metrics: List[CellMetrics],
+                                   voltage_imbalance: float, cycles: int, timespan_days: float) -> float:
+        """Calculate professional SOH using industry-standard battery degradation models"""
+
+        if not cell_metrics or timespan_days <= 0:
+            return 95.0  # Default starting point
+
+        # Professional battery degradation factors
+        age_years = timespan_days / 365.25
+
+        # 1. Capacity fade from aging (calendar aging)
+        # Typical Li-ion: 2-3% per year base degradation
+        calendar_fade = min(age_years * 2.5, 15.0)  # Cap at 15% for calendar aging
+
+        # 2. Cycle degradation
+        if cycles > 0:
+            cycle_rate = cycles / age_years if age_years > 0 else cycles
+            # Industry standard: 0.02-0.05% per cycle depending on DOD
+            cycle_fade = min(cycles * 0.035, 20.0)  # 3.5% per 100 cycles, cap at 20%
+        else:
+            cycle_fade = 0.0
+
+        # 3. Voltage imbalance penalty (professional thresholds)
+        # 20mV = concerning, 50mV = problematic, 100mV+ = critical
+        if voltage_imbalance > 0.1:  # >100mV
+            imbalance_penalty = 10.0
+        elif voltage_imbalance > 0.05:  # 50-100mV
+            imbalance_penalty = 5.0
+        elif voltage_imbalance > 0.02:  # 20-50mV
+            imbalance_penalty = 2.0
+        else:
+            imbalance_penalty = 0.0
+
+        # 4. Cell degradation variance penalty
+        if len(cell_metrics) > 1:
+            degradation_rates = [abs(m.degradation_rate) for m in cell_metrics]
+            degradation_std = np.std(degradation_rates)
+
+            # High variance in degradation = pack issues
+            variance_penalty = min(degradation_std * 100, 8.0)
+        else:
+            variance_penalty = 0.0
+
+        # 5. Temperature stress (if available)
+        temp_penalty = 0.0
+        if cell_metrics:
+            avg_max_temp = np.mean([m.temp_max for m in cell_metrics])
+            if avg_max_temp > 40:  # >40°C
+                temp_penalty = (avg_max_temp - 40) * 0.5  # 0.5% per degree above 40°C
+                temp_penalty = min(temp_penalty, 10.0)
+
+        # Calculate final SOH (start from 100%, deduct degradation)
+        base_soh = 100.0
+        total_degradation = calendar_fade + cycle_fade + imbalance_penalty + variance_penalty + temp_penalty
+
+        # Professional SOH calculation
+        professional_soh = max(base_soh - total_degradation, 65.0)  # Floor at 65% (EOL)
+
+        # Apply realistic aging curve (non-linear)
+        if age_years > 1.0:
+            # Accelerated degradation after first year
+            aging_acceleration = min((age_years - 1.0) * 1.5, 5.0)
+            professional_soh -= aging_acceleration
+
+        return max(professional_soh, 65.0)  # 65% = End of Life threshold
+
     def _classify_usage_pattern(self, voltage_df: pd.DataFrame, cycles: int, timespan_days: float) -> str:
         """Classify usage pattern based on cycling behavior"""
         if timespan_days <= 0:
@@ -447,10 +513,8 @@ class CellAnalyzer:
         timespan_days = (voltage_df.index[-1] - voltage_df.index[0]).total_seconds() / 86400 if len(voltage_df) > 0 else 1
         usage_pattern = self._classify_usage_pattern(voltage_df, cycles, timespan_days)
 
-        # Overall SOH estimation
-        degradation_penalty = min(50, abs(np.mean([m.degradation_rate for m in cell_metrics])) * 1000)
-        imbalance_penalty = min(30, voltage_imbalance * 100)
-        soh = max(0, 100 - degradation_penalty - imbalance_penalty)
+        # Professional SOH calculation using battery industry standards
+        soh = self._calculate_professional_soh(cell_metrics, voltage_imbalance, cycles, timespan_days)
 
         # Find best/worst cells
         if cell_metrics:

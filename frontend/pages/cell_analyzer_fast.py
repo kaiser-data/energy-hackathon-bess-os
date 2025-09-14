@@ -239,8 +239,7 @@ def create_fast_heatmap(heatmap_data: dict, pack_id: int) -> go.Figure:
         colorscale=colorscale,
         showscale=True,
         colorbar=dict(
-            title=f"{metric.title()}",
-            titleside="right"
+            title=f"{metric.title()}"
         )
     ))
 
@@ -305,7 +304,12 @@ with st.sidebar:
         "⚡ Last 24h": 1,
         "🔥 Last 7d": 7,
         "💨 Last 30d": 30,
-        "🚀 Last 90d": 90
+        "🚀 Last 90d": 90,
+        "📅 Last 6 Months": 180,
+        "📅 Last Year": 365,
+        "📅 Complete Range": 630,  # Oct 2023 to Jun 2025 (~21 months)
+        "🔬 Beginning Analysis": 150,  # Oct 2023-Mar 2024 for degradation onset
+        "🕐 Recent Period": 200  # 2024-2025 for current state
     }
 
     selected_range = st.selectbox("Quick Range", list(quick_ranges.keys()), index=2)

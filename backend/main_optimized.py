@@ -690,49 +690,146 @@ async def get_pack_comparison(
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
 ):
-    """Compare health across all 5 packs in a BESS system"""
-    # System-specific variations (hash-based deterministic but different per system)
-    system_hash = hash(bess_system) % 100
-    base_soh = 80 + (system_hash % 15)  # 80-95% range
-    system_factor = 1 + (system_hash % 10) / 100.0  # 1.00-1.09 multiplier
+    """Compare health across all 5 packs in a BESS system using REAL DATA"""
+    # Parse date range
+    start_dt = _parse_client_dt(start) if start else None
+    end_dt = _parse_client_dt(end) if end else None
 
-    # Fast synthetic response with system-specific data
+    try:
+        # Import real analyzer
+        from .real_cell_analyzer import get_analyzer
+        real_analyzer = get_analyzer()
+
+        # Get real pack comparison data
+        pack_summaries = real_analyzer.compare_packs_degradation(bess_system, start_dt, end_dt)
+
+        if not pack_summaries:
+            # Fallback to synthetic data if real data unavailable
+            return await get_pack_comparison_synthetic(bess_system, start, end)
+
+        # Convert real data to API format
+        packs_data = {}
+        total_healthy = total_warning = total_critical = 0
+        soh_values = []
+
+        for pack_id, summary in pack_summaries.items():
+            status, emoji, description = real_analyzer.classify_soh(summary.pack_soh)
+
+            # SOH degradation timeline
+            months_in_service = int(summary.days_analyzed / 30.44)
+            degradation_rate_per_year = summary.degradation_rate * 12
+            total_degradation = 100.0 - summary.pack_soh
+            expected_eol_months = max(12, int((summary.pack_soh - 80) / (degradation_rate_per_year / 12)))
+
+            packs_data[f"Pack {pack_id}"] = {
+                "pack_id": pack_id,
+                "pack_soh": summary.pack_soh,
+                "soh_trend": {
+                    "initial_soh": 100.0,
+                    "current_soh": summary.pack_soh,
+                    "degradation_rate_per_year": degradation_rate_per_year,
+                    "months_in_service": months_in_service,
+                    "expected_eol_months": expected_eol_months,
+                    "degradation_acceleration": "accelerated" if degradation_rate_per_year > 3.5 else "normal"
+                },
+                "average_voltage": summary.average_voltage,
+                "voltage_imbalance": summary.voltage_imbalance,
+                "avg_temperature": summary.avg_temperature,
+                "degradation_rate": summary.degradation_rate,
+                "worst_cell": summary.worst_cell,
+                "best_cell": summary.best_cell,
+                "healthy_cells": summary.healthy_cells,
+                "warning_cells": summary.warning_cells,
+                "critical_cells": summary.critical_cells,
+                "discharge_cycles": summary.discharge_cycles,
+                "usage_pattern": summary.usage_pattern
+            }
+
+            total_healthy += summary.healthy_cells
+            total_warning += summary.warning_cells
+            total_critical += summary.critical_cells
+            soh_values.append(summary.pack_soh)
+
+        # System-level summary from real data
+        average_soh = sum(soh_values) / len(soh_values) if soh_values else 95.0
+        if average_soh >= 98:
+            overall_health = "excellent"
+        elif average_soh >= 90:
+            overall_health = "nominal"
+        else:
+            overall_health = "degraded"
+
+        return {
+            "bess_system": bess_system,
+            "analysis_period": {"start": start, "end": end},
+            "packs": packs_data,
+            "system_summary": {
+                "overall_health": overall_health,
+                "total_cells": 260,
+                "average_soh": average_soh,
+                "degradation_trend": "accelerated" if any(p["soh_trend"]["degradation_acceleration"] == "accelerated" for p in packs_data.values()) else "normal_aging",
+                "total_healthy": total_healthy,
+                "total_warning": total_warning,
+                "total_critical": total_critical
+            },
+            "status": "real_data_analysis",
+            "analysis_metadata": {
+                "packs_analyzed": len(pack_summaries),
+                "data_points_per_cell": "~78K (5min resolution)",
+                "analysis_period_days": int(list(pack_summaries.values())[0].days_analyzed) if pack_summaries else 0
+            }
+        }
+
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Real data analysis failed for {bess_system}: {e}")
+        # Fallback to synthetic data
+        return await get_pack_comparison_synthetic(bess_system, start, end)
+
+
+async def get_pack_comparison_synthetic(bess_system: str, start: Optional[str], end: Optional[str]):
+    """Fallback synthetic data generation"""
+    system_hash = hash(bess_system) % 100
+    base_soh = 80 + (system_hash % 15)
+    system_factor = 1 + (system_hash % 10) / 100.0
+
     return {
         "bess_system": bess_system,
         "analysis_period": {"start": start, "end": end},
         "packs": {
             f"Pack {i}": {
                 "pack_id": i,
-                "pack_soh": base_soh + (i * 2.0 * system_factor),  # Current SOH
-                "soh_trend": {  # SOH degradation over time
-                    "initial_soh": 100.0,  # All batteries start at 100%
+                "pack_soh": base_soh + (i * 2.0 * system_factor),
+                "soh_trend": {
+                    "initial_soh": 100.0,
                     "current_soh": base_soh + (i * 2.0 * system_factor),
-                    "degradation_rate_per_year": 2.5 + (system_hash % 10) / 10,  # 2.5-3.5% per year
-                    "months_in_service": 18 + (system_hash % 12),  # 18-30 months
-                    "expected_eol_months": 120 - (system_hash % 24),  # 96-120 months to 80% SOH
-                    "degradation_acceleration": "normal" if base_soh > 85 else "accelerated"
+                    "degradation_rate_per_year": 2.5 + (system_hash % 10) / 10,
+                    "months_in_service": 18 + (system_hash % 12),
+                    "expected_eol_months": 120 - (system_hash % 24),
+                    "degradation_acceleration": "normal" if base_soh + (i * 2.0 * system_factor) > 85 else "accelerated"
                 },
                 "average_voltage": (3.60 + (system_hash % 20) / 1000) + (i * 0.02),
                 "voltage_imbalance": (0.04 + (system_hash % 20) / 1000) - (i * 0.005),
-                "avg_temperature": (22.0 + (system_hash % 15)) + (i * 1.0),
-                "degradation_rate": (0.001 + (system_hash % 10) / 10000) - (i * 0.0002),
+                "avg_temperature": (22.0 + (system_hash % 15)) + (i * 0.5),
+                "degradation_rate": max(0.001, (0.005 + (system_hash % 10) / 10000) - (i * 0.0008)),
                 "worst_cell": f"p{i}_v{26 + (system_hash % 10)}",
                 "best_cell": f"p{i}_v{15 + (system_hash % 5)}",
-                "healthy_cells": (48 + (system_hash % 5)) - i,
-                "warning_cells": (system_hash % 3) + i + 1,
-                "critical_cells": (1 if i > 2 else 0) + (system_hash % 2 if i > 3 else 0),
+                "healthy_cells": min(52, 40 + (i * 2) + (system_hash % 3)),
+                "warning_cells": max(0, (6 - i) + (system_hash % 2)),
+                "critical_cells": max(0, (6 - i) + (1 if system_hash % 3 == 0 else 0)),
                 "discharge_cycles": 1100 + (system_hash % 300) + (i * 50),
                 "usage_pattern": ["light", "moderate", "heavy"][system_hash % 3] if i < 3 else "light"
             }
-            for i in range(1, 6)  # 5 packs
+            for i in range(1, 6)
         },
         "system_summary": {
             "overall_health": ["excellent", "nominal", "degraded"][system_hash % 3],
             "total_cells": 260,
-            "average_soh": base_soh + 5.0,  # System-specific average SOH
+            "average_soh": base_soh + 5.0,
             "degradation_trend": ["normal_aging", "accelerated", "stable"][system_hash % 3]
         },
-        "status": "fast_synthetic_data"
+        "status": "synthetic_fallback"
     }
 
     try:

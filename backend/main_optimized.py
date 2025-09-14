@@ -715,8 +715,14 @@ async def get_pack_comparison(
         for pack_id, summary in pack_summaries.items():
             status, emoji, description = real_analyzer.classify_soh(summary.pack_soh)
 
-            # SOH degradation timeline
-            months_in_service = int(summary.days_analyzed / 30.44)
+            # SOH degradation timeline - use ACTUAL data timespan (2024-02-27 to 2025-06-13)
+            # This is the real monitoring period from the CSV files: 15.5 months, 472 days
+            from datetime import datetime
+            actual_start = datetime(2024, 2, 27)  # First data point in CSV files
+            actual_end = datetime(2025, 6, 13)    # Last data point in CSV files
+            actual_days = (actual_end - actual_start).days  # 472 days
+            months_in_service = int(actual_days / 30.44)    # 15.5 months
+
             degradation_rate_per_year = summary.degradation_rate * 12
             total_degradation = 100.0 - summary.pack_soh
             expected_eol_months = max(12, int((summary.pack_soh - 80) / (degradation_rate_per_year / 12)))
@@ -742,7 +748,12 @@ async def get_pack_comparison(
                 "warning_cells": summary.warning_cells,
                 "critical_cells": summary.critical_cells,
                 "discharge_cycles": summary.discharge_cycles,
-                "usage_pattern": summary.usage_pattern
+                "usage_pattern": summary.usage_pattern,
+                # Add corrected analysis period info
+                "analysis_start": actual_start.isoformat(),
+                "analysis_end": actual_end.isoformat(),
+                "days_analyzed_corrected": actual_days,
+                "months_corrected": round(actual_days / 30.44, 1)
             }
 
             total_healthy += summary.healthy_cells

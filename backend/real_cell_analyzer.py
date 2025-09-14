@@ -403,6 +403,26 @@ class RealCellAnalyzer:
             pack_degradation_rate = np.mean([cell.degradation_rate for cell in cell_metrics])
             days_analyzed = np.mean([cell.days_analyzed for cell in cell_metrics])
 
+            # Improved cycle counting - calculate first before using
+            voltage_ranges = [cell.voltage_max - cell.voltage_min for cell in cell_metrics]
+            avg_voltage_range = np.mean(voltage_ranges)
+
+            # More realistic cycle estimation:
+            # - Typical LiFePO4 voltage swing: 0.4-0.8V for full cycle
+            # - Partial cycles are common (0.1-0.3V swings)
+            # - Daily cycling is typical for BESS applications
+
+            if avg_voltage_range > 0.6:  # Deep cycling
+                cycles_per_day = 1.2  # More than one full cycle per day
+            elif avg_voltage_range > 0.4:  # Normal cycling
+                cycles_per_day = 1.0  # About one cycle per day
+            elif avg_voltage_range > 0.2:  # Light cycling
+                cycles_per_day = 0.7  # Less than one cycle per day
+            else:  # Minimal cycling
+                cycles_per_day = 0.3  # Mostly standby
+
+            discharge_cycles = int(cycles_per_day * days_analyzed)
+
             # Professional SOH calculation with improved cycle-based degradation
             age_years = days_analyzed / 365.25
             calendar_fade = min(age_years * 2.5, 15.0)  # 2.5% per year, max 15%
@@ -431,25 +451,6 @@ class RealCellAnalyzer:
             total_degradation = calendar_fade + cycle_fade + imbalance_penalty + temperature_penalty
             pack_soh = max(100.0 - total_degradation, 75.0)  # More realistic minimum 75% SOH floor
 
-            # Improved cycle counting - based on realistic charge/discharge patterns
-            voltage_ranges = [cell.voltage_max - cell.voltage_min for cell in cell_metrics]
-            avg_voltage_range = np.mean(voltage_ranges)
-
-            # More realistic cycle estimation:
-            # - Typical LiFePO4 voltage swing: 0.4-0.8V for full cycle
-            # - Partial cycles are common (0.1-0.3V swings)
-            # - Daily cycling is typical for BESS applications
-
-            if avg_voltage_range > 0.6:  # Deep cycling
-                cycles_per_day = 1.2  # More than one full cycle per day
-            elif avg_voltage_range > 0.4:  # Normal cycling
-                cycles_per_day = 1.0  # About one cycle per day
-            elif avg_voltage_range > 0.2:  # Light cycling
-                cycles_per_day = 0.7  # Less than one cycle per day
-            else:  # Minimal cycling
-                cycles_per_day = 0.3  # Mostly standby
-
-            discharge_cycles = int(cycles_per_day * days_analyzed)
 
             # Usage pattern classification
             if pack_degradation_rate > 0.4:

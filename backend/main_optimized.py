@@ -36,7 +36,7 @@ import uvloop
 
 # Import cell analyzer
 import sys
-sys.path.append('..')
+sys.path.append('.')
 from cell_analyzer import CellAnalyzer, PackHealthSummary, CellMetrics
 
 # ---------------- Runtime config ----------------
@@ -663,14 +663,17 @@ async def get_anomalous_cells(
     end: Optional[str] = Query(None),
 ):
     """Detect cells with anomalous behavior"""
+    print(f"[INFO] Anomaly detection request: {bess_system}, pack {pack_id}, {start}-{end}")
     start_dt = _parse_client_dt(start)
     end_dt = _parse_client_dt(end)
+    print(f"[INFO] Parsed dates: {start_dt} to {end_dt}")
 
     try:
         anomalous_cells = await _run_in_thread(
             cell_analyzer.detect_anomalous_cells,
             bess_system, pack_id, start_dt, end_dt
         )
+        print(f"[INFO] Found {len(anomalous_cells)} anomalous cells")
 
         anomalies = []
         for cell in anomalous_cells:

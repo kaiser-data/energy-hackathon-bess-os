@@ -162,12 +162,12 @@ class CellAnalyzer:
                        end_dt: Optional[datetime] = None) -> pd.Series:
         """Load individual cell data (voltage or temperature)"""
 
-        # Check for cached parquet first
+        # Check for CSV file
         csv_file = system_path / f"bms1_p{pack}_{metric}{cell}.csv"
         if not csv_file.exists():
             return pd.Series(dtype='float32', name=f"p{pack}_{metric}{cell}")
 
-        # Try cached parquet
+        # Try cached parquet first for speed
         sig = hashlib.md5(f"{csv_file.resolve()}::{csv_file.stat().st_size}::{csv_file.stat().st_mtime}".encode()).hexdigest()
 
         # Choose appropriate LOD based on date range
@@ -188,9 +188,13 @@ class CellAnalyzer:
                     series.index = pd.to_datetime(series.index)
                 series = series.sort_index()
             except Exception:
-                series = pd.Series(dtype='float32')
+                # Fall back to CSV if parquet fails
+                series = None
         else:
-            # Fallback to CSV
+            series = None
+
+        # Load from CSV if no parquet cache or parquet failed
+        if series is None or len(series) == 0:
             try:
                 df = pd.read_csv(csv_file)
                 df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])

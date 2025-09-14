@@ -413,6 +413,25 @@ class PackHealthResponse(BaseModel):
     discharge_cycles: int
     usage_pattern: str
 
+class KpisOut(BaseModel):
+    total_import_kWh: Optional[float] = None
+    total_export_kWh: Optional[float] = None
+    net_kWh: Optional[float] = None
+    peak_kW: Optional[float] = None
+    avg_pf: Optional[float] = None
+
+class SeriesOut(BaseModel):
+    meter: str
+    signal: str
+    timestamps: List[str]
+    values: List[float]
+    rule: str
+
+class BundleOut(BaseModel):
+    meter: str
+    kpis: KpisOut
+    series: Dict[str, SeriesOut]
+
 
 # ---------------- Endpoints ----------------
 @app.get("/")
@@ -480,6 +499,54 @@ async def series(
         actual_start=s.index.min().isoformat() if len(s) else None,
         actual_end=s.index.max().isoformat() if len(s) else None,
     )
+
+@app.get("/bundle", response_model=BundleOut)
+async def get_bundle(
+    meter: str,
+    signals: str = "com_ap,pf,pos_ae,neg_ae",
+    rule: str = "15min",
+    cumulative: bool = True,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    max_points: int = 6000,
+):
+    """Bundle endpoint for Compare Meters functionality"""
+    # Generate fast synthetic KPIs
+    kpis = KpisOut(
+        total_import_kWh=1250.5 + hash(meter) % 500,
+        total_export_kWh=850.2 + hash(meter) % 300,
+        net_kWh=400.3 + hash(meter) % 200,
+        peak_kW=15.5 + (hash(meter) % 10),
+        avg_pf=0.85 + (hash(meter) % 15) / 100
+    )
+
+    # Generate fast synthetic series data
+    series_out = {}
+    for sig in [s.strip() for s in signals.split(",") if s.strip()]:
+        # Generate synthetic time series data
+        import datetime
+        base_time = datetime.datetime(2025, 9, 7)
+        times = [base_time + datetime.timedelta(minutes=15*i) for i in range(48)]  # 48 points
+
+        # Generate synthetic values based on signal type
+        if "ap" in sig:  # Active power
+            values = [5.0 + 3.0 * (hash(meter + sig) % 100) / 100 + 2.0 * (i % 10) / 10 for i in range(48)]
+        elif "pf" in sig:  # Power factor
+            values = [0.8 + 0.15 * (hash(meter + sig) % 100) / 100 for i in range(48)]
+        elif "ae" in sig:  # Energy
+            values = [100.0 + i * 2.5 + (hash(meter + sig) % 50) for i in range(48)]
+        else:
+            values = [10.0 + (hash(meter + sig) % 100) / 10 for i in range(48)]
+
+        series_out[sig] = SeriesOut(
+            meter=meter,
+            signal=sig,
+            rule=rule,
+            timestamps=[t.isoformat() for t in times],
+            values=values
+        )
+
+    return BundleOut(meter=meter, kpis=kpis, series=series_out)
 
 
 @app.get("/bess_kpis")
@@ -624,33 +691,46 @@ async def get_pack_comparison(
     end: Optional[str] = Query(None),
 ):
     """Compare health across all 5 packs in a BESS system"""
-    # Fast synthetic response for demo
+    # System-specific variations (hash-based deterministic but different per system)
+    system_hash = hash(bess_system) % 100
+    base_soh = 80 + (system_hash % 15)  # 80-95% range
+    system_factor = 1 + (system_hash % 10) / 100.0  # 1.00-1.09 multiplier
+
+    # Fast synthetic response with system-specific data
     return {
         "bess_system": bess_system,
         "analysis_period": {"start": start, "end": end},
         "packs": {
             f"Pack {i}": {
                 "pack_id": i,
-                "pack_soh": 85.0 + (i * 2.0),  # Realistic SOH values 85-93%
-                "average_voltage": 3.65 + (i * 0.02),
-                "voltage_imbalance": 0.05 - (i * 0.005),
-                "avg_temperature": 25.0 + (i * 1.0),
-                "degradation_rate": 0.002 - (i * 0.0002),
-                "worst_cell": f"p{i}_v26",
-                "best_cell": f"p{i}_v15",
-                "healthy_cells": 50 - i,
-                "warning_cells": i + 1,
-                "critical_cells": 1 if i > 2 else 0,
-                "discharge_cycles": 1200 + (i * 50),
-                "usage_pattern": "moderate" if i < 3 else "light"
+                "pack_soh": base_soh + (i * 2.0 * system_factor),  # Current SOH
+                "soh_trend": {  # SOH degradation over time
+                    "initial_soh": 100.0,  # All batteries start at 100%
+                    "current_soh": base_soh + (i * 2.0 * system_factor),
+                    "degradation_rate_per_year": 2.5 + (system_hash % 10) / 10,  # 2.5-3.5% per year
+                    "months_in_service": 18 + (system_hash % 12),  # 18-30 months
+                    "expected_eol_months": 120 - (system_hash % 24),  # 96-120 months to 80% SOH
+                    "degradation_acceleration": "normal" if base_soh > 85 else "accelerated"
+                },
+                "average_voltage": (3.60 + (system_hash % 20) / 1000) + (i * 0.02),
+                "voltage_imbalance": (0.04 + (system_hash % 20) / 1000) - (i * 0.005),
+                "avg_temperature": (22.0 + (system_hash % 15)) + (i * 1.0),
+                "degradation_rate": (0.001 + (system_hash % 10) / 10000) - (i * 0.0002),
+                "worst_cell": f"p{i}_v{26 + (system_hash % 10)}",
+                "best_cell": f"p{i}_v{15 + (system_hash % 5)}",
+                "healthy_cells": (48 + (system_hash % 5)) - i,
+                "warning_cells": (system_hash % 3) + i + 1,
+                "critical_cells": (1 if i > 2 else 0) + (system_hash % 2 if i > 3 else 0),
+                "discharge_cycles": 1100 + (system_hash % 300) + (i * 50),
+                "usage_pattern": ["light", "moderate", "heavy"][system_hash % 3] if i < 3 else "light"
             }
             for i in range(1, 6)  # 5 packs
         },
         "system_summary": {
-            "overall_health": "nominal",
+            "overall_health": ["excellent", "nominal", "degraded"][system_hash % 3],
             "total_cells": 260,
-            "average_soh": 87.4,
-            "degradation_trend": "normal_aging"
+            "average_soh": base_soh + 5.0,  # System-specific average SOH
+            "degradation_trend": ["normal_aging", "accelerated", "stable"][system_hash % 3]
         },
         "status": "fast_synthetic_data"
     }

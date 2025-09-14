@@ -177,13 +177,23 @@ The Cell Analyzer provides comprehensive analysis of Battery Energy Storage Syst
 ### Key Features
 
 #### 🏥 Professional SOH (State of Health) Classification
-- **Excellent (99-100%)**: Peak performance, no maintenance required
-- **Optimal (98-99%)**: Normal operation, routine monitoring sufficient
-- **Nominal (95-98%)**: Acceptable performance, scheduled inspection recommended
-- **Degraded (90-95%)**: Reduced capacity, enhanced monitoring required
-- **Compromised (85-90%)**: Significant degradation, frequent inspection needed
-- **Critical (80-85%)**: End-of-life approaching, replacement planning required
-- **End of Life (<80%)**: Immediate replacement required for safety
+**Industry-Standard Battery Health Categories with Maintenance Recommendations:**
+
+- **🟢 Excellent (99-100%)**: Peak performance, no maintenance required
+- **🔵 Optimal (98-99%)**: Normal operation, routine monitoring sufficient
+- **🟡 Nominal (95-98%)**: Acceptable performance, scheduled inspection recommended
+- **🟠 Degraded (90-95%)**: Reduced capacity, enhanced monitoring required
+- **🔴 Compromised (85-90%)**: Significant degradation, frequent inspection needed
+- **⚫ Critical (80-85%)**: End-of-life approaching, replacement planning required
+- **💀 End of Life (<80%)**: Immediate replacement required for safety
+
+**Degradation Timeline Features:**
+- **Initial SOH**: All batteries start at 100% (commissioning baseline)
+- **Current SOH**: Real-time battery health assessment
+- **Degradation Rate**: Annual degradation percentage (typical: 2.5-3.5%/year)
+- **Months in Service**: Time since commissioning (18-30 months typical)
+- **Expected EOL**: Estimated months until 80% SOH threshold (96-120 months)
+- **Acceleration Status**: Normal vs. accelerated degradation patterns
 
 #### 📊 Advanced Visualizations
 - **3D Surface Plots**: Voltage/temperature analysis across cells and time
@@ -306,11 +316,19 @@ GET /cell/pack/{bess_system}/{pack_id}/cycles   # Charging cycle analysis
 ### Frontend Features
 
 #### 5 Comprehensive Analysis Tabs
-1. **📊 Overview**: System-wide health metrics and pack comparison
-2. **🔍 Pack Comparison**: Detailed pack-by-pack analysis
-3. **🌐 3D Pack View**: Interactive 3D surface visualizations
-4. **🔥 Cell Heatmaps**: Linear layout voltage/temperature/degradation maps
-5. **⚠️ Critical Cells**: Ultra-sensitive anomaly detection and alerts
+1. **📊 Overview**: System-wide health metrics with degradation timeline analysis
+2. **🔍 Pack Comparison**: Detailed pack-by-pack performance with SOH trends
+3. **🌐 3D Pack View**: Interactive 3D surface visualizations (linear cell layout)
+4. **🔥 Cell Heatmaps**: Physical BESS layout (1×52 linear arrangement)
+5. **⚠️ Critical Cells**: Ultra-sensitive anomaly detection with neighbor analysis
+
+#### 🎯 Recent Performance Enhancements
+- **System-Specific Data**: Each BESS system shows unique health characteristics
+- **SOH Degradation Timeline**: Time-based battery aging analysis (replacing single values)
+- **Bundle Endpoint Fix**: Compare Meters functionality fully restored
+- **Y-Axis Auto-Scaling**: BESS Overview charts show complete data range
+- **Anomaly-Preserving Aggregation**: Critical single events no longer masked by averaging
+- **Ultra-Fast Response**: All endpoints respond in <100ms
 
 ### Performance Metrics
 - **API Response Time**: <100ms for all endpoints

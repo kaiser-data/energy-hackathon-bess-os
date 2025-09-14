@@ -346,7 +346,15 @@ with st.sidebar:
         st.stop()
 
     system_names = sorted(bess_systems.keys())
-    selected_system = st.selectbox("⚡ BESS System", system_names, key="fast_system")
+    col_sys, col_clear = st.columns([3, 1])
+    with col_sys:
+        selected_system = st.selectbox("⚡ BESS System", system_names, key="fast_system")
+    with col_clear:
+        st.write("")  # Spacing
+        if st.button("🔄 Clear Cache", key="clear_main_cache"):
+            st.cache_data.clear()
+            st.success("Cache cleared!")
+            st.rerun()
 
     # Fast date selection
     st.markdown("#### 📅 Date Range")
@@ -391,6 +399,7 @@ with tab1:
     st.header("⚡ Lightning-Fast Pack Analysis")
 
     # Load comparison data with progress
+    st.info(f"🔍 Loading data for: **{selected_system}**")
     comparison_data = get_pack_comparison_fast(selected_system, start_str, end_str)
 
     if comparison_data and comparison_data.get("packs"):
@@ -427,26 +436,43 @@ with tab1:
 
         summary_data = []
         for pack_name, pack_data in packs.items():
-            # Health status with emojis
+            # Professional SOH classification
             soh = pack_data['pack_soh']
-            if soh >= 95:
+            soh_trend = pack_data.get('soh_trend', {})
+
+            if soh >= 99:
                 status = "🟢 Excellent"
+            elif soh >= 98:
+                status = "🔵 Optimal"
+            elif soh >= 95:
+                status = "🟡 Nominal"
+            elif soh >= 90:
+                status = "🟠 Degraded"
             elif soh >= 85:
-                status = "🟡 Good"
-            elif soh >= 70:
-                status = "🟠 Warning"
+                status = "🔴 Compromised"
+            elif soh >= 80:
+                status = "⚫ Critical"
             else:
-                status = "🔴 Critical"
+                status = "💀 End of Life"
+
+            # SOH degradation timeline
+            initial_soh = soh_trend.get('initial_soh', 100.0)
+            months_in_service = soh_trend.get('months_in_service', 18)
+            degradation_rate = soh_trend.get('degradation_rate_per_year', 2.5)
+            acceleration = soh_trend.get('degradation_acceleration', 'normal')
+            total_degradation = initial_soh - soh
+            eol_months = soh_trend.get('expected_eol_months', 120)
 
             summary_data.append({
                 "Pack": f"Pack {pack_data['pack_id']}",
                 "Status": status,
-                "SOH": f"{soh:.1f}%",
+                "Current SOH": f"{soh:.1f}%",
+                "Degradation": f"-{total_degradation:.1f}% in {months_in_service}mo",
+                "Rate/Year": f"{degradation_rate:.1f}% ({acceleration})",
+                "Est. EOL": f"~{eol_months}mo",
                 "Voltage": f"{pack_data['average_voltage']:.3f}V",
-                "Imbalance": f"{pack_data['voltage_imbalance']:.3f}V",
                 "Cycles": pack_data['discharge_cycles'],
-                "Usage": pack_data['usage_pattern'].title(),
-                "Health": f"✅{pack_data['healthy_cells']} ⚠️{pack_data['warning_cells']} ❌{pack_data['critical_cells']}"
+                "Cells": f"✅{pack_data['healthy_cells']} ⚠️{pack_data['warning_cells']} ❌{pack_data['critical_cells']}"
             })
 
         summary_df = pd.DataFrame(summary_data)

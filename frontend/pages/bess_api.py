@@ -221,11 +221,7 @@ candidates = groups_with_availability[group]
 default_pick = candidates[:3] if candidates else []
 picked = st.sidebar.multiselect("Signals", candidates, default=default_pick, key=f"{meter}-{group}")
 
-y_mode = st.sidebar.radio("Y-axis (per chart)", ["Auto", "Clip 1–99%", "Manual"], index=0)
-y_manual = {}
-if y_mode == "Manual":
-    # Manual per-unit once we know the units (we’ll ask later when rendering)
-    st.sidebar.caption("Set ranges below each chart.")
+# Y-axis is always auto-scaled (clipping controls removed)
 
 # ---------------- Content ----------------
 st.caption("Pick system, range, and signals in the sidebar.")
@@ -268,11 +264,7 @@ else:
             title = f"{group} ({disp_unit or 'various'})"
             fig = multi_line_scaled(dfu, disp_unit, title)
 
-            # optional y-range clipping/manual
-            if y_mode == "Clip 1–99%" and not dfu["display_value"].empty:
-                q1 = float(dfu["display_value"].quantile(0.01))
-                q99 = float(dfu["display_value"].quantile(0.99))
-                if q1 < q99: fig.update_yaxes(range=[q1, q99])
+            # Y-axis is always auto-scaled (clipping removed)
 
             st.plotly_chart(fig, use_container_width=True, config=MODEBAR_CONFIG)
 

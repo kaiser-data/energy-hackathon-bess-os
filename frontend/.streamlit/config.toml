@@ -1,0 +1,32 @@
+[global]
+developmentMode = false
+showWarningOnDirectExecution = false
+
+[server]
+runOnSave = false
+port = 8501
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 200
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
+showErrorDetails = true
+
+[client]
+caching = true
+displayEnabled = true
+
+[runner]
+magicEnabled = true
+installTracer = false
+fixMatplotlib = true
+
+[logger]
+level = "info"
+
+[deprecation]
+showfileUploaderEncoding = false
+showImageFormat = false
+showPyplotGlobalUse = false

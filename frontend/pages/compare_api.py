@@ -8,7 +8,9 @@ import plotly.express as px
 import streamlit as st
 
 API = st.secrets.get("API_URL", "http://127.0.0.1:8000")
-st.title("🔀 Compare Two Systems")
+st.set_page_config(page_title="🔀 Compare Systems", layout="wide")
+st.title("🔀 Compare Systems")
+st.caption("Smart Meter Suite • FastAPI + Parquet pyramids + LTTB")
 
 @st.cache_data(ttl=60)
 def _get_meters_classified():
@@ -69,48 +71,20 @@ if mA == mB:
 infoA = _get_meter_info(mA)
 infoB = _get_meter_info(mB)
 
-# Determine date range from both meters
+# Simple comparison settings
 with st.sidebar:
-    st.markdown("### ⚙️ Comparison Settings")
-    base_rule = st.selectbox("Resolution", ["5min","15min","30min","1h"], index=1)
-    cumulative = st.checkbox("Energy as cumulative", value=True)
-    
-    # Calculate overlapping date range
-    date_ranges = []
-    for info in [infoA, infoB]:
-        if info and info.get("date_range", {}).get("start"):
-            date_ranges.append({
-                "start": pd.Timestamp(info["date_range"]["start"]).date(),
-                "end": pd.Timestamp(info["date_range"]["end"]).date()
-            })
-    
-    if date_ranges:
-        # Find overlapping range
-        max_start = max(dr["start"] for dr in date_ranges)
-        min_end = min(dr["end"] for dr in date_ranges)
-        
-        if max_start <= min_end:
-            st.caption(f"Overlap: {max_start} to {min_end}")
-            default_start = max(max_start, min_end - _dt.timedelta(days=7))
-            dr = st.date_input(
-                "Date range",
-                (default_start, min_end),
-                min_value=max_start,
-                max_value=min_end
-            )
-        else:
-            st.warning("No overlapping data range!")
-            today = _dt.date.today()
-            dr = st.date_input("Date range", (today - _dt.timedelta(days=7), today))
-    else:
-        today = _dt.date.today()
-        dr = st.date_input("Date range", (today - _dt.timedelta(days=7), today))
-    
+    st.header("⚙️ Comparison Settings")
+    base_rule = st.selectbox("Resolution", ["5min","15min","1h","1d"], index=1)
+
+    # Simple date range - default to last 7 days
+    today = _dt.date.today()
+    dr = st.date_input("Date range", (today - _dt.timedelta(days=7), today))
+
     max_points = st.slider("Max points/trace", 2000, 20000, 6000, 1000)
-    
-    if infoA:
+
+    # Simple signal count display
+    if infoA and infoB:
         st.caption(f"A: {infoA.get('signal_count', 0)} signals")
-    if infoB:
         st.caption(f"B: {infoB.get('signal_count', 0)} signals")
 
 # Signal selection based on comparison type
@@ -135,12 +109,12 @@ def _date_params():
     return p
 
 @st.cache_data(show_spinner=False, ttl=60)
-def _bundle(meter: str, signals: tuple[str, ...], base_rule: str, cumulative: bool, dr: tuple[str|None, str|None], max_points: int):
+def _bundle(meter: str, signals: tuple[str, ...], base_rule: str, dr: tuple[str|None, str|None], max_points: int):
     params = {
         "meter": meter,
         "signals": ",".join(signals),
         "rule": base_rule,
-        "cumulative": str(cumulative).lower(),
+        "cumulative": "true",  # Always use cumulative for energy signals
         "max_points": max_points,
     }
     if dr[0]: params["start"] = dr[0]
@@ -160,8 +134,8 @@ dates = (_date_params().get("start"), _date_params().get("end"))
 
 try:
     with st.spinner("Loading comparison data..."):
-        bA = _bundle(mA, tuple(signals), base_rule, cumulative, dates, max_points)
-        bB = _bundle(mB, tuple(signals), base_rule, cumulative, dates, max_points)
+        bA = _bundle(mA, tuple(signals), base_rule, dates, max_points)
+        bB = _bundle(mB, tuple(signals), base_rule, dates, max_points)
 except Exception as e:
     st.error(f"Failed to load data: {e}")
     st.stop()

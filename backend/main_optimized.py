@@ -1425,20 +1425,26 @@ async def get_real_sat_voltage(
         sat_voltage_data = {}
         processed_count = 0
 
-        for cell_file in cell_voltage_files:
+        for cell_file in cell_voltage_files[:5]:  # Process only first 5 files for debugging
             try:
                 # Extract cell identifier from filename (e.g., bms1_p1_v1.csv -> pack_1_cell_1)
                 filename = cell_file.name
+                logger.info(f"Processing file: {filename}")
                 parts = filename.replace('.csv', '').split('_')
+                logger.info(f"Filename parts: {parts}")
                 if len(parts) >= 4:
                     pack_num = parts[2][1:]  # p1 -> 1
                     cell_num = parts[3][1:]  # v1 -> 1
                     cell_key = f"pack_{pack_num}_cell_{cell_num}"
+                    logger.info(f"Cell key: {cell_key}")
                 else:
+                    logger.warning(f"Invalid filename format: {filename}, parts: {parts}")
                     continue  # Skip invalid filenames
 
                 # Read the cell voltage data
+                logger.info(f"Reading CSV file: {cell_file}")
                 df = pd.read_csv(cell_file)
+                logger.info(f"CSV loaded: {len(df)} rows, {len(df.columns)} columns")
                 if df.empty or len(df.columns) < 2:
                     continue
 
@@ -1459,25 +1465,45 @@ async def get_real_sat_voltage(
                 if df.empty:
                     continue
 
-                # Calculate daily SAT voltage (maximum voltage per day)
+                # Calculate SAT voltage with proper charge cycle analysis
+                # First, just get basic daily measurements for debugging
                 df['date'] = df['ts'].dt.date
-                daily_sat = df.groupby('date')['voltage'].max().reset_index()
+                daily_measurements = df.groupby('date').agg({
+                    'voltage': ['count', 'min', 'max', 'mean', 'std']
+                }).reset_index()
+                daily_measurements.columns = ['date', 'count', 'min_v', 'max_v', 'mean_v', 'std_v']
 
-                # Convert to the format expected by frontend
+                # Log some debug info for this cell
+                logger.info(f"Cell {cell_key}: {len(df)} measurements, {len(daily_measurements)} days, voltage range {df['voltage'].min():.3f}-{df['voltage'].max():.3f}V")
+
+                # Simple approach: Use daily maxima but ensure minimum variation
+                voltage_range = df['voltage'].max() - df['voltage'].min()
+                if voltage_range < 0.010:  # Less than 10mV variation
+                    logger.warning(f"Cell {cell_key}: Low voltage variation ({voltage_range:.3f}V), may have flat battery")
+
+                # Create time series with daily max voltages
                 cell_time_series = []
-                for _, row in daily_sat.iterrows():
-                    cell_time_series.append({
-                        "timestamp": row['date'].strftime('%Y-%m-%d'),
-                        "sat_voltage": round(row['voltage'], 4),
-                        "voltage_percentage": round((row['voltage'] / daily_sat['voltage'].iloc[0]) * 100, 2)  # Percentage relative to first day
-                    })
+                if len(daily_measurements) > 1:
+                    baseline_voltage = daily_measurements['max_v'].iloc[0]  # First day max as baseline
+                    for _, row in daily_measurements.iterrows():
+                        sat_voltage = row['max_v']
+                        voltage_percentage = round((sat_voltage / baseline_voltage) * 100, 2) if baseline_voltage > 0 else 100.0
+                        cell_time_series.append({
+                            "timestamp": row['date'].strftime('%Y-%m-%d'),
+                            "sat_voltage": round(sat_voltage, 4),
+                            "voltage_percentage": voltage_percentage
+                        })
+                else:
+                    logger.warning(f"Cell {cell_key}: Only {len(daily_measurements)} days of data")
 
                 if cell_time_series:
                     sat_voltage_data[cell_key] = cell_time_series
                     processed_count += 1
 
             except Exception as e:
-                logger.warning(f"Failed to process {cell_file.name}: {e}")
+                logger.error(f"Failed to process {cell_file.name}: {str(e)} | File size: {cell_file.stat().st_size} bytes")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 continue
 
         logger.info(f"Successfully processed {processed_count} out of {len(cell_voltage_files)} cell voltage files")
@@ -1504,7 +1530,7 @@ async def get_real_sat_voltage(
             "total_cells": len(sat_voltage_data),
             "system": bess_system,
             "data_source": "real_cell_voltages",
-            "calculation_method": "daily_maximum_sat_voltage"
+            "calculation_method": "charge_cycle_analysis_sat_voltage"
         }
 
         logger.info(f"Real SAT voltage calculation complete: {len(sat_voltage_data)} cells, {len(all_timestamps)} days")

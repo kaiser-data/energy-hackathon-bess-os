@@ -1383,6 +1383,49 @@ async def get_system_degradation_3d(
         raise HTTPException(500, f"3D degradation analysis failed: {e}")
 
 
+@app.get("/debug/cell/files/{bess_system}")
+async def debug_cell_files(bess_system: str):
+    """Debug endpoint to test file discovery and processing"""
+    try:
+        root_paths = _parse_roots()
+        bess_folder = None
+
+        for root_path in root_paths:
+            potential_path = Path(root_path) / bess_system
+            if potential_path.exists() and potential_path.is_dir():
+                bess_folder = potential_path
+                break
+
+        if not bess_folder:
+            return {"error": f"BESS system {bess_system} not found"}
+
+        cell_voltage_files = list(bess_folder.glob("bms1_p*_v*.csv"))
+
+        result = {
+            "bess_folder": str(bess_folder),
+            "total_files": len(cell_voltage_files),
+            "first_5_files": [f.name for f in cell_voltage_files[:5]],
+            "test_file_read": None
+        }
+
+        if cell_voltage_files:
+            test_file = cell_voltage_files[0]
+            try:
+                df = pd.read_csv(test_file)
+                result["test_file_read"] = {
+                    "filename": test_file.name,
+                    "rows": len(df),
+                    "columns": list(df.columns),
+                    "first_few_values": df.head(3).to_dict('records')
+                }
+            except Exception as e:
+                result["test_file_read"] = {"error": str(e)}
+
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/cell/system/{bess_system}/real-sat-voltage")
 async def get_real_sat_voltage(
     bess_system: str,
@@ -1425,80 +1468,113 @@ async def get_real_sat_voltage(
         sat_voltage_data = {}
         processed_count = 0
 
-        for cell_file in cell_voltage_files[:5]:  # Process only first 5 files for debugging
+        # Process first 10 cells for testing, then scale up
+        processed_files = 0
+        max_files_to_process = min(10, len(cell_voltage_files))
+
+        for cell_file in cell_voltage_files[:max_files_to_process]:
             try:
                 # Extract cell identifier from filename (e.g., bms1_p1_v1.csv -> pack_1_cell_1)
                 filename = cell_file.name
-                logger.info(f"Processing file: {filename}")
                 parts = filename.replace('.csv', '').split('_')
-                logger.info(f"Filename parts: {parts}")
-                if len(parts) >= 4:
-                    pack_num = parts[2][1:]  # p1 -> 1
-                    cell_num = parts[3][1:]  # v1 -> 1
+                if len(parts) >= 3:
+                    pack_num = parts[1][1:]  # p1 -> 1
+                    cell_num = parts[2][1:]  # v29 -> 29
                     cell_key = f"pack_{pack_num}_cell_{cell_num}"
-                    logger.info(f"Cell key: {cell_key}")
                 else:
                     logger.warning(f"Invalid filename format: {filename}, parts: {parts}")
                     continue  # Skip invalid filenames
 
-                # Read the cell voltage data
-                logger.info(f"Reading CSV file: {cell_file}")
-                df = pd.read_csv(cell_file)
-                logger.info(f"CSV loaded: {len(df)} rows, {len(df.columns)} columns")
-                if df.empty or len(df.columns) < 2:
-                    continue
+                logger.info(f"Processing {cell_key} from {filename}")
 
-                # Parse timestamps and voltage values
-                df['ts'] = pd.to_datetime(df.iloc[:, 0])
-                df['voltage'] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
-                df = df.dropna()
+                # Read voltage data in chunks for memory efficiency
+                chunk_size = 50000  # Process 50k rows at a time
+                sat_voltage_points = []
 
-                if df.empty:
-                    continue
+                # Process file in chunks
+                for chunk in pd.read_csv(cell_file, chunksize=chunk_size):
+                    if chunk.empty or len(chunk.columns) < 2:
+                        continue
 
-                # Filter by date range if specified
-                if start_dt:
-                    df = df[df['ts'] >= start_dt]
-                if end_dt:
-                    df = df[df['ts'] <= end_dt]
+                    # Parse timestamps and voltage values
+                    chunk['ts'] = pd.to_datetime(chunk.iloc[:, 0], errors='coerce')
+                    chunk['voltage'] = pd.to_numeric(chunk.iloc[:, 1], errors='coerce')
+                    chunk = chunk.dropna()
 
-                if df.empty:
-                    continue
+                    if chunk.empty:
+                        continue
 
-                # Calculate SAT voltage with proper charge cycle analysis
-                # First, just get basic daily measurements for debugging
-                df['date'] = df['ts'].dt.date
-                daily_measurements = df.groupby('date').agg({
-                    'voltage': ['count', 'min', 'max', 'mean', 'std']
-                }).reset_index()
-                daily_measurements.columns = ['date', 'count', 'min_v', 'max_v', 'mean_v', 'std_v']
+                    # Apply date filtering
+                    if start_dt:
+                        chunk = chunk[chunk['ts'] >= start_dt]
+                    if end_dt:
+                        chunk = chunk[chunk['ts'] <= end_dt]
 
-                # Log some debug info for this cell
-                logger.info(f"Cell {cell_key}: {len(df)} measurements, {len(daily_measurements)} days, voltage range {df['voltage'].min():.3f}-{df['voltage'].max():.3f}V")
+                    if chunk.empty:
+                        continue
 
-                # Simple approach: Use daily maxima but ensure minimum variation
-                voltage_range = df['voltage'].max() - df['voltage'].min()
-                if voltage_range < 0.010:  # Less than 10mV variation
-                    logger.warning(f"Cell {cell_key}: Low voltage variation ({voltage_range:.3f}V), may have flat battery")
+                    # Sort by timestamp
+                    chunk = chunk.sort_values('ts')
 
-                # Create time series with daily max voltages
-                cell_time_series = []
-                if len(daily_measurements) > 1:
-                    baseline_voltage = daily_measurements['max_v'].iloc[0]  # First day max as baseline
-                    for _, row in daily_measurements.iterrows():
-                        sat_voltage = row['max_v']
-                        voltage_percentage = round((sat_voltage / baseline_voltage) * 100, 2) if baseline_voltage > 0 else 100.0
-                        cell_time_series.append({
-                            "timestamp": row['date'].strftime('%Y-%m-%d'),
-                            "sat_voltage": round(sat_voltage, 4),
-                            "voltage_percentage": voltage_percentage
-                        })
+                    # Detect charge cycles: look for sustained voltage increases
+                    # Calculate voltage derivative (rate of change)
+                    chunk['voltage_diff'] = chunk['voltage'].diff()
+                    chunk['time_diff'] = chunk['ts'].diff().dt.total_seconds() / 60  # minutes
+                    chunk['voltage_rate'] = chunk['voltage_diff'] / chunk['time_diff']  # V/min
+
+                    # Identify charging phases: sustained positive voltage rate > 0.0001 V/min
+                    charging_threshold = 0.0001  # 0.1mV/min minimum charging rate
+                    chunk['is_charging'] = chunk['voltage_rate'] > charging_threshold
+
+                    # Find end of charge cycles (transitions from charging to not charging)
+                    chunk['charge_cycle_end'] = (chunk['is_charging'].shift(1) & ~chunk['is_charging'])
+
+                    # Extract saturation voltages (voltage at end of charge cycles)
+                    charge_ends = chunk[chunk['charge_cycle_end']].copy()
+
+                    if len(charge_ends) > 0:
+                        for _, end_point in charge_ends.iterrows():
+                            sat_voltage_points.append({
+                                'timestamp': end_point['ts'],
+                                'sat_voltage': end_point['voltage']
+                            })
+
+                # Process collected SAT voltage points
+                if sat_voltage_points:
+                    # Convert to DataFrame and group by day
+                    sat_df = pd.DataFrame(sat_voltage_points)
+                    sat_df['date'] = sat_df['timestamp'].dt.date
+
+                    # Get the highest SAT voltage per day (best charge cycle of the day)
+                    daily_sat = sat_df.groupby('date').agg({
+                        'sat_voltage': 'max',
+                        'timestamp': 'first'
+                    }).reset_index()
+
+                    # Create time series for frontend
+                    if len(daily_sat) > 1:
+                        baseline_voltage = daily_sat['sat_voltage'].iloc[0]
+                        cell_time_series = []
+
+                        for _, row in daily_sat.iterrows():
+                            sat_voltage = row['sat_voltage']
+                            voltage_percentage = round((sat_voltage / baseline_voltage) * 100, 2)
+                            cell_time_series.append({
+                                "timestamp": row['date'].strftime('%Y-%m-%d'),
+                                "sat_voltage": round(sat_voltage, 4),
+                                "voltage_percentage": voltage_percentage
+                            })
+
+                        sat_voltage_data[cell_key] = cell_time_series
+                        processed_count += 1
+
+                        logger.info(f"Cell {cell_key}: Found {len(sat_voltage_points)} charge cycles, {len(daily_sat)} days of SAT data")
+                    else:
+                        logger.warning(f"Cell {cell_key}: Insufficient SAT voltage data")
                 else:
-                    logger.warning(f"Cell {cell_key}: Only {len(daily_measurements)} days of data")
+                    logger.warning(f"Cell {cell_key}: No charge cycles detected")
 
-                if cell_time_series:
-                    sat_voltage_data[cell_key] = cell_time_series
-                    processed_count += 1
+                processed_files += 1
 
             except Exception as e:
                 logger.error(f"Failed to process {cell_file.name}: {str(e)} | File size: {cell_file.stat().st_size} bytes")
@@ -1530,7 +1606,7 @@ async def get_real_sat_voltage(
             "total_cells": len(sat_voltage_data),
             "system": bess_system,
             "data_source": "real_cell_voltages",
-            "calculation_method": "charge_cycle_analysis_sat_voltage"
+            "calculation_method": "real_charge_cycle_analysis_with_voltage_derivatives"
         }
 
         logger.info(f"Real SAT voltage calculation complete: {len(sat_voltage_data)} cells, {len(all_timestamps)} days")

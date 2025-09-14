@@ -34,10 +34,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 import uvloop
 
-# Import cell analyzer
+# Import cell analyzer and cycle analyzer
 import sys
 sys.path.append('.')
 from cell_analyzer import CellAnalyzer, PackHealthSummary, CellMetrics
+from cell_cycle_analyzer import CellCycleAnalyzer, PackCycleComparison, CellCycle
 
 # ---------------- Runtime config ----------------
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -52,8 +53,9 @@ MAX_MEMORY_CACHE_SIZE = 128
 
 thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
-# Initialize cell analyzer
+# Initialize analyzers
 cell_analyzer = CellAnalyzer()
+cycle_analyzer = CellCycleAnalyzer()
 
 
 # ---------------- Small TTL caches ----------------
@@ -758,6 +760,230 @@ async def get_cell_heatmap_data(
         }
     except Exception as e:
         raise HTTPException(500, f"Heatmap data generation failed: {e}")
+
+
+# ============================================================================
+# CYCLE ANALYSIS ENDPOINTS
+# ============================================================================
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/cycles")
+async def get_pack_cycle_analysis(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    window_hours: Optional[int] = Query(24, description="Cycle grouping window in hours"),
+):
+    """Analyze charging cycles for all cells in a pack"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        pack_cycles = await _run_in_thread(
+            cycle_analyzer.analyze_pack_cycles,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        # Convert to JSON-serializable format
+        cycle_data = []
+        for pc in pack_cycles:
+            cycle_info = {
+                "pack_id": pc.pack_id,
+                "cycle_id": pc.cycle_id,
+                "cycle_type": pc.cycle_type,
+                "start_time": pc.start_time.isoformat(),
+                "end_time": pc.end_time.isoformat(),
+                "voltage_spread": pc.voltage_spread,
+                "timing_sync": pc.timing_sync,
+                "efficiency_variance": pc.efficiency_variance,
+                "degradation_spread": pc.degradation_spread,
+                "total_capacity": pc.total_capacity,
+                "pack_efficiency": pc.pack_efficiency,
+                "imbalance_score": pc.imbalance_score,
+                "cell_count": len(pc.cell_cycles)
+            }
+            cycle_data.append(cycle_info)
+
+        return {
+            "bess_system": bess_system,
+            "pack_id": pack_id,
+            "total_cycles": len(cycle_data),
+            "cycles": cycle_data
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Cycle analysis failed: {e}")
+
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/cycles/3d")
+async def get_pack_3d_data(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Get 3D visualization data (time × cell × voltage)"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        pack_cycles = await _run_in_thread(
+            cycle_analyzer.analyze_pack_cycles,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        # Prepare 3D data points
+        data_points = []
+        for pc in pack_cycles:
+            for cell_cycle in pc.cell_cycles:
+                point = {
+                    "time": cell_cycle.start_time.isoformat(),
+                    "timestamp": cell_cycle.start_time.timestamp(),
+                    "cell_num": cell_cycle.cell_num,
+                    "voltage": cell_cycle.start_voltage,
+                    "cycle_type": cell_cycle.cycle_type,
+                    "degradation_score": cell_cycle.degradation_score,
+                    "efficiency": cell_cycle.voltage_efficiency,
+                    "duration_minutes": cell_cycle.duration_minutes
+                }
+                data_points.append(point)
+
+        return {
+            "bess_system": bess_system,
+            "pack_id": pack_id,
+            "total_points": len(data_points),
+            "data_points": data_points
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"3D data generation failed: {e}")
+
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/cycles/stats")
+async def get_cycle_aggregation_stats(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Get aggregated cycle statistics for comparison"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        pack_cycles = await _run_in_thread(
+            cycle_analyzer.analyze_pack_cycles,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        stats = cycle_analyzer.get_cycle_aggregation_stats(pack_cycles)
+
+        return {
+            "bess_system": bess_system,
+            "pack_id": pack_id,
+            "statistics": stats
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Cycle statistics failed: {e}")
+
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/critical")
+async def get_critical_cells(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+):
+    """Detect critical cells with neighbor influence analysis"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        # Get pack cycles first
+        pack_cycles = await _run_in_thread(
+            cycle_analyzer.analyze_pack_cycles,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        # Detect critical cells with enhanced sensitivity
+        critical_cells = cycle_analyzer.detect_critical_cells(pack_cycles)
+
+        # Get neighbor analysis
+        neighbor_analysis = cycle_analyzer.analyze_neighbor_influence(pack_cycles)
+
+        return {
+            "bess_system": bess_system,
+            "pack_id": pack_id,
+            "total_critical_cells": len(critical_cells),
+            "critical_cells": critical_cells,
+            "neighbor_analysis": neighbor_analysis,
+            "analysis_summary": {
+                "cells_analyzed": len(neighbor_analysis),
+                "high_risk_cells": len([c for c in critical_cells if c['risk_level'] == 'critical']),
+                "medium_risk_cells": len([c for c in critical_cells if c['risk_level'] in ['high', 'medium']]),
+                "isolated_cells": len([k for k, v in neighbor_analysis.items() if v.get('stability_risk') == 'isolated'])
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Critical cell detection failed: {e}")
+
+
+@app.get("/cell/pack/{bess_system}/{pack_id}/neighbors")
+async def get_neighbor_analysis(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    cell_num: Optional[int] = Query(None, description="Specific cell to analyze"),
+):
+    """Analyze neighbor influence patterns"""
+    start_dt = _parse_client_dt(start)
+    end_dt = _parse_client_dt(end)
+
+    try:
+        pack_cycles = await _run_in_thread(
+            cycle_analyzer.analyze_pack_cycles,
+            bess_system, pack_id, start_dt, end_dt
+        )
+
+        neighbor_analysis = cycle_analyzer.analyze_neighbor_influence(pack_cycles)
+
+        if cell_num:
+            # Return detailed analysis for specific cell
+            if cell_num in neighbor_analysis:
+                cell_data = neighbor_analysis[cell_num]
+                return {
+                    "bess_system": bess_system,
+                    "pack_id": pack_id,
+                    "cell_num": cell_num,
+                    "neighbor_details": cell_data
+                }
+            else:
+                raise HTTPException(404, f"Cell {cell_num} not found in analysis")
+        else:
+            # Return summary for all cells
+            return {
+                "bess_system": bess_system,
+                "pack_id": pack_id,
+                "neighbor_analysis": neighbor_analysis,
+                "summary": {
+                    "total_cells": len(neighbor_analysis),
+                    "critical_neighbor_pairs": sum(
+                        len(data.get('critical_neighbors', []))
+                        for data in neighbor_analysis.values()
+                    ),
+                    "stability_risks": {
+                        risk: len([k for k, v in neighbor_analysis.items()
+                                 if v.get('stability_risk') == risk])
+                        for risk in ['stable', 'warning', 'critical', 'isolated']
+                    }
+                }
+            }
+
+    except Exception as e:
+        raise HTTPException(500, f"Neighbor analysis failed: {e}")
 
 
 # ---------------- Lifecycle ----------------

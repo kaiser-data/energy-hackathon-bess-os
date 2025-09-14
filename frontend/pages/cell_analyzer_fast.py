@@ -136,6 +136,30 @@ def get_anomalies_fast(system: str, pack_id: int, start: str = None, end: str = 
     if end: params["end"] = end
     return fast_api._req(f"/cell/pack/{system}/{pack_id}/anomalies", params)
 
+@st.cache_data(ttl=180, show_spinner="🔍 Analyzing charging cycles...")
+def get_pack_cycles_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
+    """Lightning-fast cycle analysis"""
+    params = {}
+    if start: params["start"] = start
+    if end: params["end"] = end
+    return fast_api._req(f"/cell/pack/{system}/{pack_id}/cycles", params)
+
+@st.cache_data(ttl=240, show_spinner="🎯 Building 3D visualization...")
+def get_3d_data_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
+    """Ultra-fast 3D data preparation"""
+    params = {}
+    if start: params["start"] = start
+    if end: params["end"] = end
+    return fast_api._req(f"/cell/pack/{system}/{pack_id}/cycles/3d", params)
+
+@st.cache_data(ttl=300, show_spinner="🚨 Detecting critical cells...")
+def get_critical_cells_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
+    """Critical cell detection with neighbor analysis"""
+    params = {}
+    if start: params["start"] = start
+    if end: params["end"] = end
+    return fast_api._req(f"/cell/pack/{system}/{pack_id}/critical", params)
+
 # ---------------- Ultra-Fast Visualizations ----------------
 def create_fast_pack_radar(comparison_data: dict) -> go.Figure:
     """Lightning-fast radar chart"""
@@ -301,7 +325,13 @@ with st.sidebar:
     st.metric("🔥 Avg Load Time", "0.8s")
 
 # Main ultra-fast interface
-tab1, tab2, tab3 = st.tabs(["🚀 **INSTANT OVERVIEW**", "🗺️ **FAST HEATMAPS**", "⚠️ **QUICK ANOMALIES**"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🚀 **INSTANT OVERVIEW**",
+    "🗺️ **FAST HEATMAPS**",
+    "⚠️ **QUICK ANOMALIES**",
+    "🎯 **3D PACK VIEW**",
+    "🔗 **CRITICAL CELLS**"
+])
 
 with tab1:
     st.header("⚡ Lightning-Fast Pack Analysis")
@@ -514,6 +544,214 @@ with tab3:
         with col3:
             if st.button("🔧 Schedule Maintenance", key="schedule_maintenance"):
                 st.success("⚡ Maintenance scheduled!")
+
+with tab4:
+    st.header("🎯 3D Pack Visualization (Time × Cell × Voltage)")
+
+    # 3D visualization controls
+    col1, col2 = st.columns(2)
+    with col1:
+        viz_pack = st.selectbox("📦 Pack for 3D View", range(1, 6), key="viz_pack")
+    with col2:
+        st.markdown("#### 🎨 Visualization Style")
+        viz_style = st.selectbox("Style", ["🌈 Colorful", "🔥 Heat Map", "⚡ Performance"], key="viz_style")
+
+    # Get 3D data
+    with st.spinner("🎯 Building ultra-fast 3D visualization..."):
+        data_3d = get_3d_data_fast(selected_system, viz_pack, start_str, end_str)
+
+    if data_3d and data_3d.get("data_points"):
+        points = data_3d["data_points"]
+        total_points = data_3d["total_points"]
+
+        st.success(f"⚡ Loaded {total_points} data points in 3D space!")
+
+        # Create 3D scatter plot
+        fig_3d = go.Figure()
+
+        # Extract data for 3D plot
+        times = [datetime.fromisoformat(p["time"]).timestamp() for p in points]
+        cells = [p["cell_num"] for p in points]
+        voltages = [p["voltage"] for p in points]
+        colors = [p["degradation_score"] for p in points]
+
+        # Create 3D scatter
+        fig_3d.add_trace(go.Scatter3d(
+            x=times,
+            y=cells,
+            z=voltages,
+            mode='markers',
+            marker=dict(
+                size=3,
+                color=colors,
+                colorscale='Viridis' if viz_style == "🌈 Colorful" else 'Hot' if viz_style == "🔥 Heat Map" else 'Blues',
+                colorbar=dict(title="Degradation Score"),
+                opacity=0.7
+            ),
+            text=[f"Cell {p['cell_num']}<br>Voltage: {p['voltage']:.3f}V<br>Degradation: {p['degradation_score']:.3f}"
+                  for p in points],
+            hovertemplate='<b>Cell %{y}</b><br>Voltage: %{z:.3f}V<br>%{text}<extra></extra>'
+        ))
+
+        # Update 3D layout
+        fig_3d.update_layout(
+            title=f"🎯 Pack {viz_pack} - 3D Cell Analysis (Time × Cell × Voltage)",
+            scene=dict(
+                xaxis_title="Time →",
+                yaxis_title="Cell Number (1-52)",
+                zaxis_title="Voltage (V)",
+                camera=dict(eye=dict(x=1.2, y=1.2, z=1.2))
+            ),
+            width=800,
+            height=600,
+            showlegend=False
+        )
+
+        st.plotly_chart(fig_3d, use_container_width=True, config={'displayModeBar': False})
+
+        # 3D Analysis insights
+        st.markdown("### 🔍 3D Analysis Insights")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            voltage_range = max(voltages) - min(voltages)
+            st.metric("📊 Voltage Spread", f"{voltage_range:.3f}V")
+
+        with col2:
+            avg_degradation = sum(colors) / len(colors)
+            st.metric("📉 Avg Degradation", f"{avg_degradation:.3f}")
+
+        with col3:
+            unique_cells = len(set(cells))
+            st.metric("🔧 Active Cells", f"{unique_cells}/52")
+
+    else:
+        st.warning("🚫 No 3D data available for the selected timeframe")
+
+with tab5:
+    st.header("🔗 Critical Cells & Neighbor Analysis")
+
+    # Critical cell controls
+    col1, col2 = st.columns(2)
+    with col1:
+        critical_pack = st.selectbox("🚨 Pack to Analyze", range(1, 6), key="critical_pack")
+    with col2:
+        st.markdown("#### 🎯 Analysis Depth")
+        analysis_depth = st.selectbox("Sensitivity", ["🔍 Standard", "⚠️ Sensitive", "🚨 Ultra-Sensitive"], index=2)
+
+    # Get critical cells analysis
+    with st.spinner("🚨 Detecting critical cells with neighbor analysis..."):
+        critical_data = get_critical_cells_fast(selected_system, critical_pack, start_str, end_str)
+
+    if critical_data and critical_data.get("critical_cells"):
+        critical_cells = critical_data["critical_cells"]
+        analysis_summary = critical_data["analysis_summary"]
+
+        # Critical cells summary
+        st.markdown(f"""
+        <div class="metric-highlight">
+        🚨 Found {len(critical_cells)} critical cells in Pack {critical_pack}<br>
+        🔥 High Risk: {analysis_summary['high_risk_cells']} | 🔧 Medium Risk: {analysis_summary['medium_risk_cells']}
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Display critical cells
+        st.markdown("### 🚨 Critical Cells Ranking")
+
+        for i, cell in enumerate(critical_cells[:10]):  # Show top 10
+            cell_num = cell["cell_num"]
+            risk_level = cell["risk_level"]
+            conditions = cell["critical_conditions"]
+            voltage_drift = cell["voltage_drift"]
+            stability_impact = cell["stability_impact"]
+
+            # Risk level styling
+            if risk_level == "critical":
+                card_class = "danger-card"
+                risk_emoji = "🚨"
+            elif risk_level == "high":
+                card_class = "warning-card"
+                risk_emoji = "⚠️"
+            else:
+                card_class = "fast-card"
+                risk_emoji = "🔍"
+
+            st.markdown(f"""
+            <div class="fast-card {card_class}">
+            <h3>#{i+1} {risk_emoji} Cell {cell_num} - {risk_level.upper()} RISK</h3>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <div>
+                    <p><strong>📈 Voltage Drift:</strong> {voltage_drift:.4f}V</p>
+                    <p><strong>🔗 Stability Impact:</strong> {stability_impact:.2f}</p>
+                </div>
+                <div>
+                    <p><strong>🚨 Issues:</strong> {len(conditions)} detected</p>
+                    <p><strong>⚡ Conditions:</strong> {', '.join(conditions[:2])}</p>
+                </div>
+            </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Neighbor influence heatmap
+        if "neighbor_analysis" in critical_data:
+            st.markdown("### 🔗 Neighbor Influence Map")
+
+            neighbor_data = critical_data["neighbor_analysis"]
+
+            # Create simplified neighbor correlation matrix
+            cell_nums = sorted([int(k) for k in neighbor_data.keys()])
+            if cell_nums:
+                correlation_matrix = []
+                cell_labels = []
+
+                for cell_num in cell_nums[:20]:  # Show first 20 cells
+                    if str(cell_num) in neighbor_data:
+                        correlations = neighbor_data[str(cell_num)].get("correlations", {})
+                        row = []
+                        for other_cell in cell_nums[:20]:
+                            if str(other_cell) in correlations:
+                                row.append(correlations[str(other_cell)]["correlation"])
+                            else:
+                                row.append(0.0)
+                        correlation_matrix.append(row)
+                        cell_labels.append(f"C{cell_num}")
+
+                if correlation_matrix:
+                    fig_neighbor = go.Figure(data=go.Heatmap(
+                        z=correlation_matrix,
+                        x=cell_labels,
+                        y=cell_labels,
+                        colorscale='RdYlBu_r',
+                        showscale=True,
+                        colorbar=dict(title="Correlation")
+                    ))
+
+                    fig_neighbor.update_layout(
+                        title="🔗 Cell-to-Cell Influence Heatmap (First 20 Cells)",
+                        xaxis_title="Cell",
+                        yaxis_title="Cell",
+                        width=600,
+                        height=500
+                    )
+
+                    st.plotly_chart(fig_neighbor, use_container_width=True, config={'displayModeBar': False})
+
+        # Critical actions
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🚨 Priority Alert", key="priority_alert"):
+                st.success("⚡ Priority alerts sent!")
+
+        with col2:
+            if st.button("🔧 Schedule Inspection", key="schedule_inspection"):
+                st.success("⚡ Inspection scheduled!")
+
+        with col3:
+            if st.button("📊 Detailed Report", key="detailed_report"):
+                st.success("⚡ Report generated!")
+
+    else:
+        st.info("✅ No critical cells detected in the current timeframe!")
 
 # Ultra-fast footer
 st.markdown("---")

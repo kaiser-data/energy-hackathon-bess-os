@@ -1426,6 +1426,9 @@ async def debug_cell_files(bess_system: str):
         return {"error": str(e)}
 
 
+# Simple cache for real SAT voltage data
+_real_sat_cache = {}
+
 @app.get("/cell/system/{bess_system}/real-sat-voltage")
 async def get_real_sat_voltage(
     bess_system: str,
@@ -1438,6 +1441,14 @@ async def get_real_sat_voltage(
     SAT voltage = maximum voltage achieved during charge cycles
     Calculated from actual BMS cell voltage data, not synthetic health metrics
     """
+    # Check cache first (cache for 5 minutes)
+    cache_key = f"{bess_system}_{start}_{end}_{time_resolution}"
+    if cache_key in _real_sat_cache:
+        cached_result, cached_time = _real_sat_cache[cache_key]
+        if datetime.now().timestamp() - cached_time < 300:  # 5 minute cache
+            logger.info(f"Returning cached real SAT voltage data for {bess_system}")
+            return cached_result
+
     try:
         start_dt = _parse_client_dt(start) if start else None
         end_dt = _parse_client_dt(end) if end else None
@@ -1468,9 +1479,10 @@ async def get_real_sat_voltage(
         sat_voltage_data = {}
         processed_count = 0
 
-        # Process more cells now that the algorithm is working
+        # Balance between data coverage and response time
+        # Start with fewer cells for better user experience, can be increased later
         processed_files = 0
-        max_files_to_process = min(50, len(cell_voltage_files))  # Process 50 cells for better coverage
+        max_files_to_process = min(20, len(cell_voltage_files))  # Process 20 cells for balanced coverage/speed
 
         for cell_file in cell_voltage_files[:max_files_to_process]:
             try:
@@ -1640,6 +1652,10 @@ async def get_real_sat_voltage(
         }
 
         logger.info(f"Real SAT voltage calculation complete: {len(sat_voltage_data)} cells, {len(all_timestamps)} days")
+
+        # Cache the result
+        _real_sat_cache[cache_key] = (result, datetime.now().timestamp())
+
         return result
 
     except Exception as e:

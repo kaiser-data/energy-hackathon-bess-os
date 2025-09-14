@@ -715,37 +715,43 @@ async def get_pack_comparison(
         for pack_id, summary in pack_summaries.items():
             status, emoji, description = real_analyzer.classify_soh(summary.pack_soh)
 
-            # SOH degradation timeline - use ACTUAL data timespan from CSV files
-            # Real monitoring period: Oct 4, 2023 to June 13, 2025 = 20.3 months
-            from datetime import datetime
-            actual_start = datetime(2023, 10, 4)  # First data point in CSV files
-            actual_end = datetime(2025, 6, 13)    # Last data point in CSV files
-            actual_days = (actual_end - actual_start).days  # 618 days
-            months_in_service = int(actual_days / 30.44)    # 20.3 months ≈ 20 months
+            # SOH degradation timeline - use ACTUAL data timespan from this specific BESS system
+            # Get the real date range from the analyzed cell data
+            days_analyzed = summary.days_analyzed  # Real days from CSV data
+            months_in_service = int(days_analyzed / 30.44)  # Convert to months
 
-            # Calculate actual degradation from the 20.3 months of real data
-            total_degradation = 100.0 - summary.pack_soh  # Current degradation amount
+            # Ensure SOH cannot exceed 100% (batteries cannot improve beyond new condition)
+            corrected_pack_soh = min(summary.pack_soh, 100.0)
 
-            # Fix EOL calculation using realistic approach based on actual observed degradation
-            # If we've degraded total_degradation% in months_in_service months,
-            # how long until we reach 80% (20% total degradation)?
-            if total_degradation > 0 and months_in_service > 0:
+            # Calculate actual degradation from the real monitoring period for this BESS system
+            total_degradation = 100.0 - corrected_pack_soh  # Current degradation amount
+
+            # Calculate degradation rate based on observed data
+            if months_in_service > 0:
+                # Observed degradation rate from real data
                 actual_degradation_rate_per_month = total_degradation / months_in_service
                 degradation_rate_per_year = actual_degradation_rate_per_month * 12
-                remaining_degradation_allowed = summary.pack_soh - 80.0  # How much more we can degrade
-                expected_eol_months = max(12, int(remaining_degradation_allowed / actual_degradation_rate_per_month))
+
+                # EOL calculation: when will we reach 80% SOH?
+                if actual_degradation_rate_per_month > 0:
+                    remaining_degradation_allowed = corrected_pack_soh - 80.0  # How much more we can degrade
+                    expected_eol_months = max(12, int(remaining_degradation_allowed / actual_degradation_rate_per_month))
+                else:
+                    # No degradation observed - conservative estimate
+                    degradation_rate_per_year = 2.0  # Assume 2%/year minimum for aging batteries
+                    expected_eol_months = int((corrected_pack_soh - 80.0) / (2.0 / 12))
             else:
-                # Fallback to cell analyzer degradation rate if no observed degradation
-                degradation_rate_per_year = summary.degradation_rate * 12  # summary.degradation_rate is %/month
-                actual_degradation_rate_per_month = summary.degradation_rate
-                expected_eol_months = 120  # Default if no degradation detected
+                # No time data - use conservative defaults
+                degradation_rate_per_year = 2.5  # Conservative 2.5%/year
+                actual_degradation_rate_per_month = degradation_rate_per_year / 12
+                expected_eol_months = int((corrected_pack_soh - 80.0) / actual_degradation_rate_per_month)
 
             packs_data[f"Pack {pack_id}"] = {
                 "pack_id": pack_id,
-                "pack_soh": summary.pack_soh,
+                "pack_soh": corrected_pack_soh,
                 "soh_trend": {
                     "initial_soh": 100.0,
-                    "current_soh": summary.pack_soh,
+                    "current_soh": corrected_pack_soh,
                     "degradation_rate_per_year": degradation_rate_per_year,
                     "months_in_service": months_in_service,
                     "expected_eol_months": expected_eol_months,

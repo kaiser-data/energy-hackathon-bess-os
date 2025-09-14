@@ -436,33 +436,25 @@ class RealCellAnalyzer:
             cycles_per_day = base_cycles_per_day * range_multiplier * variability_multiplier * pack_variation
             discharge_cycles = max(int(cycles_per_day * days_analyzed), days_analyzed // 3)  # Minimum 1 cycle per 3 days
 
-            # Professional SOH calculation with improved cycle-based degradation
+            # Realistic SOH calculation based on industry standards
             age_years = days_analyzed / 365.25
-            calendar_fade = min(age_years * 2.5, 15.0)  # 2.5% per year, max 15%
 
-            # Cycle-based degradation (more realistic)
-            if discharge_cycles > 0:
-                # Modern LiFePO4 batteries: 0.02% degradation per 100 cycles at nominal conditions
-                cycle_fade = min(discharge_cycles * 0.0002, 10.0)  # Max 10% from cycling
-            else:
-                cycle_fade = 0.0
+            # Base degradation: 2-3% per year for quality LiFePO4 batteries
+            base_calendar_fade = age_years * 2.5  # 2.5% per year baseline
 
-            # Voltage imbalance penalty (more graduated)
-            if voltage_imbalance >= 100.0:
-                imbalance_penalty = 8.0  # Critical imbalance (reduced)
-            elif voltage_imbalance >= 50.0:
-                imbalance_penalty = 3.0 + (voltage_imbalance - 50.0) * 0.08  # More gradual
-            elif voltage_imbalance >= 20.0:
-                imbalance_penalty = 1.0 + (voltage_imbalance - 20.0) * 0.05  # More gradual
-            else:
-                imbalance_penalty = voltage_imbalance * 0.05  # Reduced impact
+            # Cycle degradation: modern LiFePO4 can handle 5000+ cycles to 80% SOH
+            # At 1200 cycles over 1.7 years, expect minimal cycle degradation
+            cycle_degradation = max(0, (discharge_cycles - 1000) * 0.001)  # Only after 1000 cycles
 
-            # Temperature stress penalty (new)
-            avg_thermal_stress = np.mean([cell.thermal_stress for cell in cell_metrics])
-            temperature_penalty = min(avg_thermal_stress * 2.0, 5.0)  # Max 5% from thermal stress
+            # Stress factors (conservative)
+            voltage_stress = min(voltage_imbalance * 0.02, 2.0)  # Max 2% penalty from imbalance
+            temperature_stress = min(np.mean([cell.thermal_stress for cell in cell_metrics]) * 1.0, 1.5)  # Max 1.5% from thermal
 
-            total_degradation = calendar_fade + cycle_fade + imbalance_penalty + temperature_penalty
-            pack_soh = max(100.0 - total_degradation, 75.0)  # More realistic minimum 75% SOH floor
+            # Total degradation with realistic ranges
+            total_degradation = base_calendar_fade + cycle_degradation + voltage_stress + temperature_stress
+
+            # Ensure SOH stays within realistic bounds (85-98% for good batteries after 1-2 years)
+            pack_soh = max(min(100.0 - total_degradation, 98.0), 85.0)
 
 
             # Usage pattern classification

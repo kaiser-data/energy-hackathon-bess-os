@@ -18,8 +18,12 @@ from __future__ import annotations
 import os
 import time
 import hashlib
+import logging
 import asyncio
 from pathlib import Path
+
+# Configure logger
+logger = logging.getLogger(__name__)
 from typing import Dict, Optional, List, Tuple, Any
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -696,93 +700,120 @@ async def get_pack_comparison(
     end_dt = _parse_client_dt(end) if end else None
 
     try:
-        # Import real analyzer
-        from .real_cell_analyzer import get_analyzer
-        real_analyzer = get_analyzer()
+        # Load health metrics using the same method as degradation-3d endpoint
+        time_series_data = _load_health_metrics_from_manifest(bess_system, "1d", start_dt, end_dt)
 
-        # Get real pack comparison data
-        pack_summaries = real_analyzer.compare_packs_degradation(bess_system, start_dt, end_dt)
+        # Debug logging
+        logger.info(f"Comparison endpoint: loaded {len(time_series_data)} timestamps for {bess_system}")
+        if time_series_data:
+            first_key = list(time_series_data.keys())[0]
+            first_cells = time_series_data[first_key]
+            logger.info(f"First timestamp {first_key} has {len(first_cells)} cells")
+            logger.info(f"Sample cell data structure: {list(first_cells.items())[0] if first_cells else 'no cells'}")
 
-        if not pack_summaries:
-            # Fallback to synthetic data if real data unavailable
-            return await get_pack_comparison_synthetic(bess_system, start, end)
+        if not time_series_data:
+            # No real data - return empty response
+            return {
+                "bess_system": bess_system,
+                "packs": {},
+                "summary": {
+                    "total_cells": 0,
+                    "healthy_cells": 0,
+                    "warning_cells": 0,
+                    "critical_cells": 0,
+                    "average_soh": 0
+                },
+                "status": "no_data",
+                "message": "No real data available for this system"
+            }
 
-        # Convert real data to API format
-        packs_data = {}
+        # Process time series data to extract pack-level summaries
+        pack_data = {}
+        all_health_values = []
+        cell_count_by_pack = {}
+
+        # Get time range from the data
+        timestamps = sorted(time_series_data.keys())
+        first_date = timestamps[0]
+        last_date = timestamps[-1]
+        days_analyzed = (last_date - first_date).total_seconds() / 86400.0
+
+        # Group cells by pack and calculate health statistics
+        for timestamp, cells_at_time in time_series_data.items():
+            for cell_key, cell_data in cells_at_time.items():
+                # Convert degradation to health percentage (same as degradation-3d endpoint)
+                health_percentage = float(100 - cell_data["degradation_percent"])
+                pack_num = cell_data["pack_id"]
+
+                if pack_num not in pack_data:
+                    pack_data[pack_num] = []
+                    cell_count_by_pack[pack_num] = set()
+
+                pack_data[pack_num].append(health_percentage)
+                cell_count_by_pack[pack_num].add(cell_key)
+                all_health_values.append(health_percentage)
+
+        # Calculate pack summaries
+        packs_response = {}
         total_healthy = total_warning = total_critical = 0
         soh_values = []
 
-        for pack_id, summary in pack_summaries.items():
-            status, emoji, description = real_analyzer.classify_soh(summary.pack_soh)
+        for pack_num, health_values in pack_data.items():
+            if not health_values:
+                continue
 
-            # SOH degradation timeline - use ACTUAL data timespan from this specific BESS system
-            # Get the real date range from the pack analysis period (more accurate than per-cell average)
-            analysis_start = summary.analysis_start
-            analysis_end = summary.analysis_end
-            days_analyzed = (analysis_end - analysis_start).total_seconds() / 86400.0  # Real days from actual date range
-            months_in_service = round(days_analyzed / 30.44, 1)  # Convert to months with precision
+            # Pack health statistics
+            pack_soh = sum(health_values) / len(health_values)
+            min_health = min(health_values)
+            max_health = max(health_values)
+            cell_count = len(cell_count_by_pack[pack_num])
 
-            # Ensure SOH cannot exceed 100% (batteries cannot improve beyond new condition)
-            corrected_pack_soh = min(summary.pack_soh, 100.0)
+            # Classify cells by health
+            healthy = sum(1 for h in health_values if h >= 95)
+            warning = sum(1 for h in health_values if 90 <= h < 95)
+            critical = sum(1 for h in health_values if h < 90)
 
-            # Calculate actual degradation from the real monitoring period for this BESS system
-            total_degradation = 100.0 - corrected_pack_soh  # Current degradation amount
+            # Calculate degradation metrics
+            total_degradation = 100.0 - pack_soh
+            months_in_service = max(1.0, days_analyzed / 30.44)
+            degradation_rate_per_month = total_degradation / months_in_service
+            degradation_rate_per_year = degradation_rate_per_month * 12
 
-            # Calculate degradation rate based on observed data
-            if months_in_service > 0:
-                # Observed degradation rate from real data
-                actual_degradation_rate_per_month = total_degradation / months_in_service
-                degradation_rate_per_year = actual_degradation_rate_per_month * 12
-
-                # EOL calculation: when will we reach 80% SOH?
-                if actual_degradation_rate_per_month > 0:
-                    remaining_degradation_allowed = corrected_pack_soh - 80.0  # How much more we can degrade
-                    expected_eol_months = max(12, int(remaining_degradation_allowed / actual_degradation_rate_per_month))
-                else:
-                    # No degradation observed - conservative estimate
-                    degradation_rate_per_year = 2.0  # Assume 2%/year minimum for aging batteries
-                    expected_eol_months = int((corrected_pack_soh - 80.0) / (2.0 / 12))
+            # EOL prediction (when SOH reaches 80%)
+            remaining_degradation = pack_soh - 80.0
+            if degradation_rate_per_month > 0:
+                expected_eol_months = max(12, int(remaining_degradation / degradation_rate_per_month))
             else:
-                # No time data - use conservative defaults
-                degradation_rate_per_year = 2.5  # Conservative 2.5%/year
-                actual_degradation_rate_per_month = degradation_rate_per_year / 12
-                expected_eol_months = int((corrected_pack_soh - 80.0) / actual_degradation_rate_per_month)
+                expected_eol_months = 120
 
-            packs_data[f"Pack {pack_id}"] = {
-                "pack_id": pack_id,
-                "pack_soh": corrected_pack_soh,
+            packs_response[f"Pack {pack_num}"] = {
+                "pack_id": pack_num,
+                "pack_soh": pack_soh,
                 "soh_trend": {
                     "initial_soh": 100.0,
-                    "current_soh": corrected_pack_soh,
+                    "current_soh": pack_soh,
                     "degradation_rate_per_year": degradation_rate_per_year,
                     "months_in_service": months_in_service,
                     "expected_eol_months": expected_eol_months,
                     "degradation_acceleration": "accelerated" if degradation_rate_per_year > 3.5 else "normal"
                 },
-                "average_voltage": summary.average_voltage,
-                "voltage_imbalance": summary.voltage_imbalance,
-                "avg_temperature": summary.avg_temperature,
-                "degradation_rate": actual_degradation_rate_per_month if total_degradation > 0 and months_in_service > 0 else summary.degradation_rate,
-                "worst_cell": summary.worst_cell,
-                "best_cell": summary.best_cell,
-                "healthy_cells": summary.healthy_cells,
-                "warning_cells": summary.warning_cells,
-                "critical_cells": summary.critical_cells,
-                "discharge_cycles": summary.discharge_cycles,
-                "usage_pattern": summary.usage_pattern,
-                # Add corrected analysis period info
-                "analysis_start": actual_start.isoformat(),
-                "analysis_end": actual_end.isoformat(),
-                "days_analyzed_corrected": actual_days,
-                "months_corrected": round(actual_days / 30.44, 1)
+                "cells_analyzed": cell_count,
+                "min_health": min_health,
+                "max_health": max_health,
+                "healthy_cells": healthy,
+                "warning_cells": warning,
+                "critical_cells": critical,
+                "analysis_start": first_date.isoformat(),
+                "analysis_end": last_date.isoformat(),
+                "days_analyzed": days_analyzed
             }
 
-            total_healthy += summary.healthy_cells
-            total_warning += summary.warning_cells
-            total_critical += summary.critical_cells
-            soh_values.append(summary.pack_soh)
+            total_healthy += healthy
+            total_warning += warning
+            total_critical += critical
+            soh_values.append(pack_soh)
 
-        # System-level summary from real data
+        # System-level summary
         average_soh = sum(soh_values) / len(soh_values) if soh_values else 95.0
         if average_soh >= 98:
             overall_health = "excellent"
@@ -794,74 +825,53 @@ async def get_pack_comparison(
         return {
             "bess_system": bess_system,
             "analysis_period": {"start": start, "end": end},
-            "packs": packs_data,
-            "system_summary": {
-                "overall_health": overall_health,
-                "total_cells": 260,
-                "average_soh": average_soh,
-                "degradation_trend": "accelerated" if any(p["soh_trend"]["degradation_acceleration"] == "accelerated" for p in packs_data.values()) else "normal_aging",
-                "total_healthy": total_healthy,
-                "total_warning": total_warning,
-                "total_critical": total_critical
+            "packs": packs_response,
+            "summary": {
+                "total_cells": len(all_health_values) // len(timestamps) if timestamps else 0,
+                "healthy_cells": total_healthy,
+                "warning_cells": total_warning,
+                "critical_cells": total_critical,
+                "average_soh": average_soh
             },
-            "status": "real_data_analysis",
-            "analysis_metadata": {
-                "packs_analyzed": len(pack_summaries),
-                "data_points_per_cell": "~78K (5min resolution)",
-                "analysis_period_days": int(list(pack_summaries.values())[0].days_analyzed) if pack_summaries else 0
-            }
+            "status": "success",
+            "message": f"Real data analysis for {len(packs_response)} packs"
         }
 
     except Exception as e:
         import logging
         logger = logging.getLogger(__name__)
         logger.error(f"Real data analysis failed for {bess_system}: {e}")
-        # Fallback to synthetic data
-        return await get_pack_comparison_synthetic(bess_system, start, end)
+        # No real data - return empty response
+        return {
+            "bess_system": bess_system,
+            "packs": {},
+            "summary": {
+                "total_cells": 0,
+                "healthy_cells": 0,
+                "warning_cells": 0,
+                "critical_cells": 0,
+                "average_soh": 0
+            },
+            "status": "no_data",
+            "message": "No real data available"
+        }
 
 
 async def get_pack_comparison_synthetic(bess_system: str, start: Optional[str], end: Optional[str]):
-    """Fallback synthetic data generation"""
-    system_hash = hash(bess_system) % 100
-    base_soh = 80 + (system_hash % 15)
-    system_factor = 1 + (system_hash % 10) / 100.0
-
+    """Deprecated - returns empty data instead of synthetic"""
+    # NO SYNTHETIC DATA - return empty/zero data
     return {
         "bess_system": bess_system,
-        "analysis_period": {"start": start, "end": end},
-        "packs": {
-            f"Pack {i}": {
-                "pack_id": i,
-                "pack_soh": base_soh + (i * 2.0 * system_factor),
-                "soh_trend": {
-                    "initial_soh": 100.0,
-                    "current_soh": base_soh + (i * 2.0 * system_factor),
-                    "degradation_rate_per_year": 2.5 + (system_hash % 10) / 10,
-                    "months_in_service": 18 + (system_hash % 12),
-                    "expected_eol_months": 120 - (system_hash % 24),
-                    "degradation_acceleration": "normal" if base_soh + (i * 2.0 * system_factor) > 85 else "accelerated"
-                },
-                "average_voltage": (3.60 + (system_hash % 20) / 1000) + (i * 0.02),
-                "voltage_imbalance": (0.04 + (system_hash % 20) / 1000) - (i * 0.005),
-                "avg_temperature": (22.0 + (system_hash % 15)) + (i * 0.5),
-                "degradation_rate": max(0.001, (0.005 + (system_hash % 10) / 10000) - (i * 0.0008)),
-                "worst_cell": f"p{i}_v{26 + (system_hash % 10)}",
-                "best_cell": f"p{i}_v{15 + (system_hash % 5)}",
-                "healthy_cells": min(52, 40 + (i * 2) + (system_hash % 3)),
-                "warning_cells": max(0, (6 - i) + (system_hash % 2)),
-                "critical_cells": max(0, (6 - i) + (1 if system_hash % 3 == 0 else 0)),
-                "discharge_cycles": 1100 + (system_hash % 300) + (i * 50),
-                "usage_pattern": ["light", "moderate", "heavy"][system_hash % 3] if i < 3 else "light"
-            }
-            for i in range(1, 6)
+        "packs": {},
+        "summary": {
+            "total_cells": 0,
+            "healthy_cells": 0,
+            "warning_cells": 0,
+            "critical_cells": 0,
+            "average_soh": 0
         },
-        "system_summary": {
-            "overall_health": ["excellent", "nominal", "degraded"][system_hash % 3],
-            "total_cells": 260,
-            "average_soh": base_soh + 5.0,
-            "degradation_trend": ["normal_aging", "accelerated", "stable"][system_hash % 3]
-        },
-        "status": "synthetic_fallback"
+        "status": "no_data",
+        "message": "No data available"
     }
 
     try:
@@ -1051,6 +1061,117 @@ async def get_pack_cycle_analysis(
         raise HTTPException(500, f"Cycle analysis failed: {e}")
 
 
+@app.get("/cell/pack/{bess_system}/{pack_id}/cycles/3d")
+async def get_pack_cycles_3d(
+    bess_system: str,
+    pack_id: int,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    time_resolution: str = Query("1d", description="Time resolution for 3D plot (1h, 1d, 1w)")
+):
+    """Get 3D cycle degradation data for a specific pack
+
+    Returns cycle-based degradation data suitable for 3D visualization showing:
+    - X-axis: Cell number (1-52 in the pack)
+    - Y-axis: Time (date range)
+    - Z-axis: Health percentage
+    """
+    try:
+        # Parse time range if provided
+        start_dt = None
+        end_dt = None
+        if start:
+            start_dt = _parse_client_dt(start)
+        if end:
+            end_dt = _parse_client_dt(end)
+
+        # Initialize real cell analyzer
+        from .real_cell_analyzer import get_analyzer
+        analyzer = get_analyzer()
+
+        # Auto-detect date range if not provided by checking actual data availability
+        if not start_dt or not end_dt:
+            logger.info(f"Auto-detecting date range for {bess_system} pack {pack_id}...")
+            # Try to load a sample cell voltage signal from this pack to get actual date range
+            sample_signal = f"bms1_p{pack_id}_v1"
+            sample_series = analyzer.get_cached_series(bess_system, sample_signal)
+            if sample_series is not None and not sample_series.empty:
+                actual_start = sample_series.index.min()
+                actual_end = sample_series.index.max()
+                if not start_dt:
+                    start_dt = actual_start.to_pydatetime()
+                if not end_dt:
+                    end_dt = actual_end.to_pydatetime()
+                logger.info(f"Detected date range for pack {pack_id}: {start_dt} to {end_dt}")
+            else:
+                logger.warning(f"Could not detect date range for {bess_system} pack {pack_id}, no sample data found")
+
+        # Load preprocessed health metrics from manifest
+        logger.info(f"Loading preprocessed health metrics for {bess_system} pack {pack_id}")
+        time_series_data = _load_health_metrics_from_manifest(bess_system, time_resolution, start_dt, end_dt)
+
+        # Filter data for the specified pack only
+        plot_data = {
+            "degradation_3d": {},
+            "metadata": {
+                "total_cells": 0,
+                "time_range": {"start": None, "end": None},
+                "resolution": time_resolution,
+                "system": bess_system,
+                "pack_id": pack_id
+            }
+        }
+
+        # Process time series data and filter by pack
+        if time_series_data:
+            timestamps = sorted(time_series_data.keys())
+            plot_data["time_range"] = {
+                "start": timestamps[0].isoformat(),
+                "end": timestamps[-1].isoformat()
+            }
+
+            # Build degradation_3d structure for this pack only: {cell_key: [{timestamp, health_percentage}, ...]}
+            degradation_3d = {}
+            pack_prefix = f"pack_{pack_id}_cell_"
+
+            for timestamp in timestamps:
+                timestamp_data = time_series_data[timestamp]
+                for cell_key, cell_data in timestamp_data.items():
+                    # Filter to only cells from the specified pack
+                    if cell_key.startswith(pack_prefix):
+                        if cell_key not in degradation_3d:
+                            degradation_3d[cell_key] = []
+
+                        degradation_3d[cell_key].append({
+                            "timestamp": timestamp.isoformat(),
+                            "health_percentage": float(100 - cell_data["degradation_percent"])  # Convert degradation to health
+                        })
+
+            plot_data["degradation_3d"] = degradation_3d
+            plot_data["total_cells"] = len(degradation_3d)
+            plot_data["system"] = bess_system
+            plot_data["pack_id"] = pack_id
+
+        if not plot_data["degradation_3d"]:
+            # No real data - return empty/zero data, NOT synthetic
+            logger.warning(f"No real health data found for {bess_system} pack {pack_id}, returning empty data")
+            plot_data["degradation_3d"] = {}
+            plot_data["total_cells"] = 0
+            plot_data["time_range"] = {
+                "start": None,
+                "end": None
+            }
+            plot_data["system"] = bess_system
+            plot_data["pack_id"] = pack_id
+            plot_data["status"] = "no_data"
+            plot_data["message"] = f"No real data available for pack {pack_id}"
+
+        return plot_data
+
+    except Exception as e:
+        raise HTTPException(500, f"Pack 3D cycles analysis failed: {e}")
+
+
 @app.get("/cell/pack/{bess_system}/{pack_id}/degradation-timeline")
 async def get_pack_degradation_timeline(
     bess_system: str,
@@ -1060,274 +1181,338 @@ async def get_pack_degradation_timeline(
     max_points: int = Query(500, description="Max data points for visualization")
 ):
     """Get cell degradation over time with critical cell highlighting"""
+
+def _load_health_metrics_from_manifest(bess_system: str, time_resolution: str, start_dt: Optional[datetime] = None, end_dt: Optional[datetime] = None) -> Dict:
+    """Load preprocessed health metrics from the manifest for 3D visualization."""
+    import json
+
+    time_series_data = {}
+    manifest_path = Path("backend/.meter_cache/manifest.json")
+
+    if not manifest_path.exists():
+        logger.warning("No manifest found, cannot load health metrics")
+        return time_series_data
+
     try:
+        manifest = json.loads(manifest_path.read_text())
+        health_folder_name = f"data/BESS/{bess_system}_health_metrics"
+
+        # Find the health metrics folder in manifest
+        health_folder = None
+        for folder in manifest["folders"]:
+            if folder["folder"] == health_folder_name:
+                health_folder = folder
+                break
+
+        if not health_folder:
+            logger.warning(f"No health metrics found for {bess_system}")
+            return time_series_data
+
+        logger.info(f"Found {len(health_folder['processed'])} health signals for {bess_system}")
+
+        # Load health data for each cell
+        for proc in health_folder["processed"]:
+            try:
+                # Parse cell info from CSV name: ZHPESS232A230007_health_p1_c23.csv -> pack 1, cell 23
+                csv_name = Path(proc["csv"]).name
+                if not csv_name.startswith(f"{bess_system}_health_"):
+                    continue
+
+                # Extract pack and cell numbers
+                health_part = csv_name.replace(f"{bess_system}_health_", "").replace(".csv", "")
+                if not health_part.startswith("p") or "_c" not in health_part:
+                    continue
+
+                parts = health_part.split("_c")
+                pack_num = int(parts[0][1:])  # p1 -> 1
+                cell_num = int(parts[1])      # 23 -> 23
+
+                # Load health parquet data at requested resolution
+                if time_resolution not in proc["parquets"]:
+                    continue
+
+                health_parquet = Path(proc["parquets"][time_resolution])
+                if not health_parquet.exists():
+                    continue
+
+                health_df = pd.read_parquet(health_parquet)
+                health_series = health_df["value"]
+
+                # Filter by date range if provided
+                if start_dt:
+                    health_series = health_series[health_series.index >= start_dt]
+                if end_dt:
+                    health_series = health_series[health_series.index <= end_dt]
+
+                if len(health_series) == 0:
+                    continue
+
+                # Convert health percentage to degradation percentage for 3D viz
+                # Health 96-100% -> Degradation 0-4%
+                degradation_series = (100 - health_series).clip(0, 25)
+
+                # Store in time series format
+                for timestamp, degradation_pct in degradation_series.items():
+                    cell_key = f"pack_{pack_num}_cell_{cell_num}"
+                    if timestamp not in time_series_data:
+                        time_series_data[timestamp] = {}
+                    time_series_data[timestamp][cell_key] = {
+                        "pack_id": pack_num,
+                        "cell_id": cell_num,
+                        "degradation_percent": float(degradation_pct),
+                        "health_percent": float(100 - degradation_pct),
+                        "health_status": "excellent" if degradation_pct < 1 else "nominal" if degradation_pct < 5 else "watch" if degradation_pct < 10 else "critical"
+                    }
+
+                logger.info(f"Loaded {len(health_series)} health points for pack {pack_num} cell {cell_num}")
+
+            except Exception as e:
+                logger.warning(f"Failed to load health data for {proc['csv']}: {e}")
+                continue
+
+        logger.info(f"Loaded health metrics for {len(time_series_data)} timestamps")
+        return time_series_data
+
+    except Exception as e:
+        logger.error(f"Failed to load health metrics from manifest: {e}")
+        return time_series_data
+
+
+@app.get("/cell/system/{bess_system}/degradation-3d")
+async def get_system_degradation_3d(
+    bess_system: str,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    time_resolution: str = Query("1d", description="Time resolution for 3D plot (1h, 1d, 1w)")
+):
+    """Get 3D degradation data: cell number vs time vs degradation for all packs
+
+    Returns data suitable for 3D visualization showing:
+    - X-axis: Cell number (1-52 per pack)
+    - Y-axis: Time (date range)
+    - Z-axis: Degradation percentage
+    - Color: Pack ID
+    """
+    try:
+        # Parse time range if provided
+        start_dt = None
+        end_dt = None
+        if start:
+            start_dt = _parse_client_dt(start)
+        if end:
+            end_dt = _parse_client_dt(end)
+
         # Initialize real cell analyzer
         from .real_cell_analyzer import get_analyzer
         analyzer = get_analyzer()
 
-        # Analyze pack health to identify critical cells
-        pack_summary = analyzer.analyze_pack_health(bess_system, pack_id)
-        if not pack_summary:
-            raise HTTPException(404, f"No data found for {bess_system} pack {pack_id}")
+        # Auto-detect date range if not provided by checking actual data availability
+        if not start_dt or not end_dt:
+            logger.info(f"Auto-detecting date range for {bess_system}...")
+            # Try to load a sample cell voltage signal to get actual date range
+            sample_signal = f"bms1_p1_v1"
+            sample_series = analyzer.get_cached_series(bess_system, sample_signal)
+            if sample_series is not None and not sample_series.empty:
+                actual_start = sample_series.index.min()
+                actual_end = sample_series.index.max()
+                if not start_dt:
+                    start_dt = actual_start.to_pydatetime()
+                if not end_dt:
+                    end_dt = actual_end.to_pydatetime()
+                logger.info(f"Detected date range: {start_dt} to {end_dt}")
+            else:
+                logger.warning(f"Could not detect date range for {bess_system}, no sample data found")
 
-        # Get time range
-        start_dt = pd.to_datetime(start).tz_localize('UTC').tz_convert(BERLIN_TZ) if start else None
-        end_dt = pd.to_datetime(end).tz_localize('UTC').tz_convert(BERLIN_TZ) if end else None
+        # Load preprocessed health metrics from manifest
+        logger.info(f"Loading preprocessed health metrics for {bess_system}")
+        time_series_data = _load_health_metrics_from_manifest(bess_system, time_resolution, start_dt, end_dt)
 
-        # Sample representative cells: worst, best, and a few others
-        cell_sample = []
+        # Convert to 3D visualization format expected by frontend
+        plot_data = {
+            "degradation_3d": {},  # Frontend expects this key!
+            "metadata": {
+                "total_cells": 0,
+                "time_range": {"start": None, "end": None},
+                "resolution": time_resolution,
+                "system": bess_system
+            }
+        }
 
-        # Always include worst and best cells
-        worst_cell_id = int(pack_summary.worst_cell.split('_v')[-1])
-        best_cell_id = int(pack_summary.best_cell.split('_v')[-1])
-        cell_sample.extend([worst_cell_id, best_cell_id])
+        # Process time series data into the format frontend expects
+        if time_series_data:
+            timestamps = sorted(time_series_data.keys())
+            plot_data["time_range"] = {
+                "start": timestamps[0].isoformat(),
+                "end": timestamps[-1].isoformat()
+            }
 
-        # Add a few more cells for comparison (spread across pack)
-        additional_cells = [1, 13, 26, 39, 52]  # Representative spread
-        for cell_id in additional_cells:
-            if cell_id not in cell_sample:
-                cell_sample.append(cell_id)
+            # Build degradation_3d structure: {cell_key: [{timestamp, health_percentage}, ...]}
+            degradation_3d = {}
 
-        # Limit to first 8 cells for performance
-        cell_sample = cell_sample[:8]
+            for timestamp in timestamps:
+                timestamp_data = time_series_data[timestamp]
+                for cell_key, cell_data in timestamp_data.items():
+                    if cell_key not in degradation_3d:
+                        degradation_3d[cell_key] = []
 
-        cell_timelines = []
+                    degradation_3d[cell_key].append({
+                        "timestamp": timestamp.isoformat(),
+                        "health_percentage": float(100 - cell_data["degradation_percent"])  # Convert degradation to health
+                    })
 
-        for cell_id in cell_sample:
-            # Get voltage data
-            voltage_signal = f"bms1_p{pack_id}_v{cell_id}"
-            voltage_series = analyzer.get_cached_series(bess_system, voltage_signal, start_dt, end_dt)
+            plot_data["degradation_3d"] = degradation_3d
+            plot_data["total_cells"] = len(degradation_3d)
+            plot_data["system"] = bess_system
 
-            # Get temperature data
-            temp_signal = f"bms1_p{pack_id}_t{cell_id}"
-            temp_series = analyzer.get_cached_series(bess_system, temp_signal, start_dt, end_dt)
+        if not plot_data["degradation_3d"]:
+            # No real data - return empty/zero data, NOT synthetic
+            logger.warning(f"No real health data found for {bess_system}, returning empty data")
+            plot_data["degradation_3d"] = {}
+            plot_data["total_cells"] = 0
+            plot_data["time_range"] = {
+                "start": None,
+                "end": None
+            }
+            plot_data["system"] = bess_system
+            plot_data["status"] = "no_data"
+            plot_data["message"] = "No real data available for this system"
 
-            if voltage_series is None or voltage_series.empty:
+        return plot_data
+
+    except Exception as e:
+        raise HTTPException(500, f"3D degradation analysis failed: {e}")
+
+
+@app.get("/cell/system/{bess_system}/real-sat-voltage")
+async def get_real_sat_voltage(
+    bess_system: str,
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    time_resolution: str = Query("1d", description="Time resolution (1d only for now)")
+):
+    """Get real SAT voltage calculated directly from individual cell voltage files
+
+    SAT voltage = maximum voltage achieved during charge cycles
+    Calculated from actual BMS cell voltage data, not synthetic health metrics
+    """
+    try:
+        start_dt = _parse_client_dt(start) if start else None
+        end_dt = _parse_client_dt(end) if end else None
+
+        # Find the BESS system folder
+        root_paths = _parse_roots()
+        bess_folder = None
+
+        for root_path in root_paths:
+            potential_path = Path(root_path) / bess_system
+            if potential_path.exists() and potential_path.is_dir():
+                bess_folder = potential_path
+                break
+
+        if not bess_folder:
+            raise HTTPException(404, f"BESS system {bess_system} not found")
+
+        logger.info(f"Loading real cell voltages from {bess_folder}")
+
+        # Find all individual cell voltage files (bms1_p*_v*.csv)
+        cell_voltage_files = list(bess_folder.glob("bms1_p*_v*.csv"))
+        if not cell_voltage_files:
+            raise HTTPException(404, f"No individual cell voltage files found for {bess_system}")
+
+        logger.info(f"Found {len(cell_voltage_files)} individual cell voltage files")
+
+        # Process each cell file to calculate daily SAT voltage
+        sat_voltage_data = {}
+        processed_count = 0
+
+        for cell_file in cell_voltage_files:
+            try:
+                # Extract cell identifier from filename (e.g., bms1_p1_v1.csv -> pack_1_cell_1)
+                filename = cell_file.name
+                parts = filename.replace('.csv', '').split('_')
+                if len(parts) >= 4:
+                    pack_num = parts[2][1:]  # p1 -> 1
+                    cell_num = parts[3][1:]  # v1 -> 1
+                    cell_key = f"pack_{pack_num}_cell_{cell_num}"
+                else:
+                    continue  # Skip invalid filenames
+
+                # Read the cell voltage data
+                df = pd.read_csv(cell_file)
+                if df.empty or len(df.columns) < 2:
+                    continue
+
+                # Parse timestamps and voltage values
+                df['ts'] = pd.to_datetime(df.iloc[:, 0])
+                df['voltage'] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
+                df = df.dropna()
+
+                if df.empty:
+                    continue
+
+                # Filter by date range if specified
+                if start_dt:
+                    df = df[df['ts'] >= start_dt]
+                if end_dt:
+                    df = df[df['ts'] <= end_dt]
+
+                if df.empty:
+                    continue
+
+                # Calculate daily SAT voltage (maximum voltage per day)
+                df['date'] = df['ts'].dt.date
+                daily_sat = df.groupby('date')['voltage'].max().reset_index()
+
+                # Convert to the format expected by frontend
+                cell_time_series = []
+                for _, row in daily_sat.iterrows():
+                    cell_time_series.append({
+                        "timestamp": row['date'].strftime('%Y-%m-%d'),
+                        "sat_voltage": round(row['voltage'], 4),
+                        "voltage_percentage": round((row['voltage'] / daily_sat['voltage'].iloc[0]) * 100, 2)  # Percentage relative to first day
+                    })
+
+                if cell_time_series:
+                    sat_voltage_data[cell_key] = cell_time_series
+                    processed_count += 1
+
+            except Exception as e:
+                logger.warning(f"Failed to process {cell_file.name}: {e}")
                 continue
 
-            # Downsample for visualization performance
-            if len(voltage_series) > max_points:
-                # Use LTTB downsampling
-                from .main import lttb_downsample
-                voltage_data = [(ts.timestamp() * 1000, val) for ts, val in voltage_series.items()]
-                voltage_downsampled = lttb_downsample(voltage_data, max_points)
-                voltage_times, voltage_values = zip(*voltage_downsampled)
-            else:
-                voltage_times = [ts.timestamp() * 1000 for ts in voltage_series.index]
-                voltage_values = voltage_series.values.tolist()
+        logger.info(f"Successfully processed {processed_count} out of {len(cell_voltage_files)} cell voltage files")
 
-            # Process temperature data similarly
-            if temp_series is not None and not temp_series.empty:
-                if len(temp_series) > max_points:
-                    temp_data = [(ts.timestamp() * 1000, val) for ts, val in temp_series.items()]
-                    from .main import lttb_downsample
-                    temp_downsampled = lttb_downsample(temp_data, max_points)
-                    temp_times, temp_values = zip(*temp_downsampled)
-                else:
-                    temp_times = [ts.timestamp() * 1000 for ts in temp_series.index]
-                    temp_values = temp_series.values.tolist()
-            else:
-                temp_times = voltage_times
-                temp_values = [25.0] * len(voltage_times)  # Default temp
+        if not sat_voltage_data:
+            raise HTTPException(404, f"No valid voltage data found for {bess_system}")
 
-            # Classify cell criticality
-            is_worst = cell_id == worst_cell_id
-            is_best = cell_id == best_cell_id
+        # Calculate time range from actual data
+        all_timestamps = []
+        for cell_data in sat_voltage_data.values():
+            all_timestamps.extend([point["timestamp"] for point in cell_data])
 
-            if is_worst:
-                cell_status = "critical"
-                color = "#ff4444"
-            elif is_best:
-                cell_status = "excellent"
-                color = "#44ff44"
-            else:
-                cell_status = "normal"
-                color = "#4444ff"
-
-            # Calculate basic degradation indicators
-            voltage_trend = 0.0
-            if len(voltage_values) > 10:
-                # Simple linear trend
-                x = list(range(len(voltage_values)))
-                voltage_trend = np.polyfit(x, voltage_values, 1)[0]  # Slope
-
-            cell_timelines.append({
-                "cell_id": cell_id,
-                "cell_label": f"Cell {cell_id}",
-                "status": cell_status,
-                "color": color,
-                "is_worst": is_worst,
-                "is_best": is_best,
-                "voltage_data": {
-                    "times": voltage_times,
-                    "values": voltage_values,
-                    "trend": voltage_trend
-                },
-                "temperature_data": {
-                    "times": temp_times,
-                    "values": temp_values
-                },
-                "stats": {
-                    "voltage_mean": float(np.mean(voltage_values)),
-                    "voltage_min": float(np.min(voltage_values)),
-                    "voltage_max": float(np.max(voltage_values)),
-                    "voltage_std": float(np.std(voltage_values)),
-                    "temp_mean": float(np.mean(temp_values)) if temp_values else 25.0
-                }
-            })
-
-        return {
-            "bess_system": bess_system,
-            "pack_id": pack_id,
-            "pack_soh": pack_summary.pack_soh,
-            "analysis_period": {
-                "start": pack_summary.analysis_start.isoformat(),
-                "end": pack_summary.analysis_end.isoformat(),
-                "days": pack_summary.days_analyzed
-            },
-            "cell_count": len(cell_timelines),
-            "worst_cell": pack_summary.worst_cell,
-            "best_cell": pack_summary.best_cell,
-            "cell_timelines": cell_timelines
-        }
-
-    except Exception as e:
-        raise HTTPException(500, f"Timeline analysis failed: {e}")
-
-
-@app.get("/cell/pack/{bess_system}/{pack_id}/cycles/stats")
-async def get_cycle_aggregation_stats(
-    bess_system: str,
-    pack_id: int,
-    start: Optional[str] = Query(None),
-    end: Optional[str] = Query(None),
-):
-    """Get aggregated cycle statistics for comparison"""
-    start_dt = _parse_client_dt(start)
-    end_dt = _parse_client_dt(end)
-
-    try:
-        pack_cycles = await _run_in_thread(
-            cycle_analyzer.analyze_pack_cycles,
-            bess_system, pack_id, start_dt, end_dt
-        )
-
-        stats = cycle_analyzer.get_cycle_aggregation_stats(pack_cycles)
-
-        return {
-            "bess_system": bess_system,
-            "pack_id": pack_id,
-            "statistics": stats
-        }
-
-    except Exception as e:
-        raise HTTPException(500, f"Cycle statistics failed: {e}")
-
-
-@app.get("/cell/pack/{bess_system}/{pack_id}/critical")
-async def get_critical_cells(
-    bess_system: str,
-    pack_id: int,
-    start: Optional[str] = Query(None),
-    end: Optional[str] = Query(None),
-):
-    """Detect critical cells with neighbor influence analysis"""
-    # Quick test response for now
-    return {
-        "bess_system": bess_system,
-        "pack_id": pack_id,
-        "start": start,
-        "end": end,
-        "status": "endpoint_working",
-        "critical_cells": [],
-        "message": "Cell analyzer endpoints are working - optimization in progress"
-    }
-
-    try:
-        # Get pack cycles first
-        pack_cycles = await _run_in_thread(
-            cycle_analyzer.analyze_pack_cycles,
-            bess_system, pack_id, start_dt, end_dt
-        )
-
-        # Detect critical cells with enhanced sensitivity
-        critical_cells = cycle_analyzer.detect_critical_cells(pack_cycles)
-
-        # Get neighbor analysis
-        neighbor_analysis = cycle_analyzer.analyze_neighbor_influence(pack_cycles)
-
-        return {
-            "bess_system": bess_system,
-            "pack_id": pack_id,
-            "total_critical_cells": len(critical_cells),
-            "critical_cells": critical_cells,
-            "neighbor_analysis": neighbor_analysis,
-            "analysis_summary": {
-                "cells_analyzed": len(neighbor_analysis),
-                "high_risk_cells": len([c for c in critical_cells if c['risk_level'] == 'critical']),
-                "medium_risk_cells": len([c for c in critical_cells if c['risk_level'] in ['high', 'medium']]),
-                "isolated_cells": len([k for k, v in neighbor_analysis.items() if v.get('stability_risk') == 'isolated'])
-            }
-        }
-
-    except Exception as e:
-        raise HTTPException(500, f"Critical cell detection failed: {e}")
-
-
-@app.get("/cell/pack/{bess_system}/{pack_id}/neighbors")
-async def get_neighbor_analysis(
-    bess_system: str,
-    pack_id: int,
-    start: Optional[str] = Query(None),
-    end: Optional[str] = Query(None),
-    cell_num: Optional[int] = Query(None, description="Specific cell to analyze"),
-):
-    """Analyze neighbor influence patterns"""
-    start_dt = _parse_client_dt(start)
-    end_dt = _parse_client_dt(end)
-
-    try:
-        pack_cycles = await _run_in_thread(
-            cycle_analyzer.analyze_pack_cycles,
-            bess_system, pack_id, start_dt, end_dt
-        )
-
-        neighbor_analysis = cycle_analyzer.analyze_neighbor_influence(pack_cycles)
-
-        if cell_num:
-            # Return detailed analysis for specific cell
-            if cell_num in neighbor_analysis:
-                cell_data = neighbor_analysis[cell_num]
-                return {
-                    "bess_system": bess_system,
-                    "pack_id": pack_id,
-                    "cell_num": cell_num,
-                    "neighbor_details": cell_data
-                }
-            else:
-                raise HTTPException(404, f"Cell {cell_num} not found in analysis")
-        else:
-            # Return summary for all cells
-            return {
-                "bess_system": bess_system,
-                "pack_id": pack_id,
-                "neighbor_analysis": neighbor_analysis,
-                "summary": {
-                    "total_cells": len(neighbor_analysis),
-                    "critical_neighbor_pairs": sum(
-                        len(data.get('critical_neighbors', []))
-                        for data in neighbor_analysis.values()
-                    ),
-                    "stability_risks": {
-                        risk: len([k for k, v in neighbor_analysis.items()
-                                 if v.get('stability_risk') == risk])
-                        for risk in ['stable', 'warning', 'critical', 'isolated']
-                    }
-                }
+        time_range = {}
+        if all_timestamps:
+            all_timestamps = sorted(set(all_timestamps))
+            time_range = {
+                "start": f"{all_timestamps[0]}T00:00:00+02:00",
+                "end": f"{all_timestamps[-1]}T23:59:59+02:00"
             }
 
+        result = {
+            "degradation_3d": sat_voltage_data,  # Frontend expects this key
+            "time_range": time_range,
+            "total_cells": len(sat_voltage_data),
+            "system": bess_system,
+            "data_source": "real_cell_voltages",
+            "calculation_method": "daily_maximum_sat_voltage"
+        }
+
+        logger.info(f"Real SAT voltage calculation complete: {len(sat_voltage_data)} cells, {len(all_timestamps)} days")
+        return result
+
     except Exception as e:
-        raise HTTPException(500, f"Neighbor analysis failed: {e}")
+        logger.error(f"Real SAT voltage calculation failed: {e}")
+        raise HTTPException(500, f"Real SAT voltage calculation failed: {e}")
 
 
 # ---------------- Lifecycle ----------------

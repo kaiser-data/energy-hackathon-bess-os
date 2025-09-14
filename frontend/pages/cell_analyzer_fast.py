@@ -31,9 +31,21 @@ def get_bess_systems():
 
 @st.cache_data(ttl=60)
 def get_cell_health_data(system: str):
-    """Load real cell health data using degradation-3d endpoint"""
+    """Load real SAT voltage data directly from BMS cell voltage files"""
     params = {"time_resolution": "1d"}
+    # Try the new real SAT voltage endpoint first
+    try:
+        data = api_call(f"/cell/system/{system}/real-sat-voltage", params)
+        if data and data.get("data_source") == "real_cell_voltages":
+            st.info(f"📡 Using real BMS voltage data: {data.get('calculation_method', 'unknown')}")
+            return data
+    except:
+        pass
+
+    # Fallback to synthetic health data
     data = api_call(f"/cell/system/{system}/degradation-3d", params)
+    if data:
+        st.warning("⚠️ Using synthetic health metrics - real voltage calculation failed")
 
     if not data or "degradation_3d" not in data:
         return {"cells": [], "timestamps": [], "health_matrix": []}
@@ -73,7 +85,11 @@ def get_cell_health_data(system: str):
 
             for point in cell_data:
                 if point["timestamp"] == timestamp:
-                    health_value = point["health_percentage"]
+                    # Handle both real voltage data and synthetic health data
+                    if "voltage_percentage" in point:
+                        health_value = point["voltage_percentage"]  # Real SAT voltage percentage
+                    elif "health_percentage" in point:
+                        health_value = point["health_percentage"]   # Synthetic health data
                     break
 
             row.append(health_value)

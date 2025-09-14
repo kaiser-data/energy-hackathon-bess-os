@@ -345,22 +345,43 @@ class RealCellAnalyzer:
             best_cell = f"p{pack_id}_v1"
 
             for cell in cell_metrics:
-                # Classification logic with realistic thresholds
-                is_critical = (
-                    abs(cell.voltage_imbalance) > self.CELL_THRESHOLDS['voltage_deviation'] or
-                    cell.temp_std > self.CELL_THRESHOLDS['temperature_variation'] or
-                    cell.degradation_rate > self.CELL_THRESHOLDS['degradation_rate'] or
-                    cell.voltage_spike_count > 20 or  # Relaxed spike threshold
-                    cell.temp_spike_count > 10
-                )
+                # More realistic classification logic - require multiple factors for critical status
+                critical_factors = 0
+                warning_factors = 0
 
-                is_warning = (
-                    abs(cell.voltage_imbalance) > self.CELL_THRESHOLDS['warning_voltage_deviation'] or
-                    cell.temp_std > self.CELL_THRESHOLDS['warning_temperature_variation'] or
-                    cell.degradation_rate > self.CELL_THRESHOLDS['warning_degradation_rate'] or
-                    cell.voltage_spike_count > 10 or  # Warning spike threshold
-                    cell.temp_spike_count > 5
-                )
+                # Check voltage imbalance (most important factor)
+                if abs(cell.voltage_imbalance) > self.CELL_THRESHOLDS['voltage_deviation']:
+                    critical_factors += 2  # Major factor
+                elif abs(cell.voltage_imbalance) > self.CELL_THRESHOLDS['warning_voltage_deviation']:
+                    warning_factors += 1
+
+                # Check temperature variation
+                if cell.temp_std > self.CELL_THRESHOLDS['temperature_variation']:
+                    critical_factors += 1
+                elif cell.temp_std > self.CELL_THRESHOLDS['warning_temperature_variation']:
+                    warning_factors += 1
+
+                # Check degradation rate (normalized to realistic scale)
+                if cell.degradation_rate > self.CELL_THRESHOLDS['degradation_rate']:
+                    critical_factors += 1
+                elif cell.degradation_rate > self.CELL_THRESHOLDS['warning_degradation_rate']:
+                    warning_factors += 1
+
+                # Check spike counts (more lenient)
+                if cell.voltage_spike_count > 50:  # Much more lenient
+                    critical_factors += 1
+                elif cell.voltage_spike_count > 20:
+                    warning_factors += 1
+
+                # Temperature spike threshold
+                if cell.temp_spike_count > 30:  # Much more lenient
+                    critical_factors += 1
+                elif cell.temp_spike_count > 10:
+                    warning_factors += 1
+
+                # Require multiple factors for critical classification
+                is_critical = critical_factors >= 2
+                is_warning = warning_factors >= 2 or (critical_factors >= 1 and warning_factors >= 1)
 
                 if is_critical:
                     critical_cells += 1
@@ -382,28 +403,53 @@ class RealCellAnalyzer:
             pack_degradation_rate = np.mean([cell.degradation_rate for cell in cell_metrics])
             days_analyzed = np.mean([cell.days_analyzed for cell in cell_metrics])
 
-            # Professional SOH calculation
+            # Professional SOH calculation with improved cycle-based degradation
             age_years = days_analyzed / 365.25
             calendar_fade = min(age_years * 2.5, 15.0)  # 2.5% per year, max 15%
 
-            # Voltage imbalance penalty
-            if voltage_imbalance >= 100.0:
-                imbalance_penalty = 10.0  # Critical imbalance
-            elif voltage_imbalance >= 50.0:
-                imbalance_penalty = 5.0 + (voltage_imbalance - 50.0) * 0.1
-            elif voltage_imbalance >= 20.0:
-                imbalance_penalty = 2.0 + (voltage_imbalance - 20.0) * 0.1
+            # Cycle-based degradation (more realistic)
+            if discharge_cycles > 0:
+                # Modern LiFePO4 batteries: 0.02% degradation per 100 cycles at nominal conditions
+                cycle_fade = min(discharge_cycles * 0.0002, 10.0)  # Max 10% from cycling
             else:
-                imbalance_penalty = voltage_imbalance * 0.1
+                cycle_fade = 0.0
 
-            total_degradation = calendar_fade + imbalance_penalty + (pack_degradation_rate * 12 * age_years)
-            pack_soh = max(100.0 - total_degradation, 20.0)  # Minimum 20% SOH floor
+            # Voltage imbalance penalty (more graduated)
+            if voltage_imbalance >= 100.0:
+                imbalance_penalty = 8.0  # Critical imbalance (reduced)
+            elif voltage_imbalance >= 50.0:
+                imbalance_penalty = 3.0 + (voltage_imbalance - 50.0) * 0.08  # More gradual
+            elif voltage_imbalance >= 20.0:
+                imbalance_penalty = 1.0 + (voltage_imbalance - 20.0) * 0.05  # More gradual
+            else:
+                imbalance_penalty = voltage_imbalance * 0.05  # Reduced impact
 
-            # Estimate discharge cycles (simplified - based on voltage variations)
+            # Temperature stress penalty (new)
+            avg_thermal_stress = np.mean([cell.thermal_stress for cell in cell_metrics])
+            temperature_penalty = min(avg_thermal_stress * 2.0, 5.0)  # Max 5% from thermal stress
+
+            total_degradation = calendar_fade + cycle_fade + imbalance_penalty + temperature_penalty
+            pack_soh = max(100.0 - total_degradation, 75.0)  # More realistic minimum 75% SOH floor
+
+            # Improved cycle counting - based on realistic charge/discharge patterns
             voltage_ranges = [cell.voltage_max - cell.voltage_min for cell in cell_metrics]
             avg_voltage_range = np.mean(voltage_ranges)
-            # Rough estimate: larger voltage swings indicate more cycles
-            discharge_cycles = int(avg_voltage_range * 1000 * days_analyzed / 30)  # Cycles per month
+
+            # More realistic cycle estimation:
+            # - Typical LiFePO4 voltage swing: 0.4-0.8V for full cycle
+            # - Partial cycles are common (0.1-0.3V swings)
+            # - Daily cycling is typical for BESS applications
+
+            if avg_voltage_range > 0.6:  # Deep cycling
+                cycles_per_day = 1.2  # More than one full cycle per day
+            elif avg_voltage_range > 0.4:  # Normal cycling
+                cycles_per_day = 1.0  # About one cycle per day
+            elif avg_voltage_range > 0.2:  # Light cycling
+                cycles_per_day = 0.7  # Less than one cycle per day
+            else:  # Minimal cycling
+                cycles_per_day = 0.3  # Mostly standby
+
+            discharge_cycles = int(cycles_per_day * days_analyzed)
 
             # Usage pattern classification
             if pack_degradation_rate > 0.4:

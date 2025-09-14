@@ -22,14 +22,14 @@ bess = st.Page(
     icon=":material/battery_charging_full:",
     url_path="bess",
 )
-cell_analyzer = st.Page(
+pack_analyzer = st.Page(
     "pages/cell_analyzer_fast.py",
-    title="Cell Analyzer",
+    title="Pack Analyzer",
     icon=":material/analytics:",
-    url_path="cells",
+    url_path="packs",
 )
 
-nav = st.navigation({"Dashboards": [single, compare, bess], "Advanced": [cell_analyzer]})
+nav = st.navigation({"Dashboards": [single, compare, bess], "PackPulse 💓": [pack_analyzer]})
 
 with st.sidebar:
     st.markdown("### ⚡ Smart Meter Suite")

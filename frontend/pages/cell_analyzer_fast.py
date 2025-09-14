@@ -8,7 +8,6 @@ import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime, timedelta
 from scipy import stats
-from sklearn.linear_model import LinearRegression
 
 API_URL = os.environ.get("API_URL", "http://127.0.0.1:8000")
 
@@ -155,7 +154,7 @@ with col4:
         st.metric("Avg SAT-V", f"{avg_sat_voltage:.1f}%")
 
 # Create tabs
-tab1, tab2, tab3, tab4 = st.tabs(["📊 SAT Voltage Overview", "🗺️ SAT Voltage Heatmap", "📈 Pack Trends", "📉 Degradation Analysis"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 SAT Voltage Overview", "🗺️ Heatmap & 3D View", "📈 Pack Trends", "📉 Degradation Analysis"])
 
 with tab1:
     st.subheader("SAT Voltage Analysis Overview")
@@ -205,7 +204,7 @@ with tab1:
             st.dataframe(pd.DataFrame(pack_data), use_container_width=True)
 
 with tab2:
-    st.subheader("Cell Voltage Index Heatmap")
+    st.subheader("SAT Voltage Heatmap & 3D Surface")
 
     if health_data["health_matrix"] and health_data["timestamps"]:
         # Create heatmap data with proper cell labels
@@ -247,6 +246,64 @@ with tab2:
         )
         fig_heatmap.update_layout(height=600)
         st.plotly_chart(fig_heatmap, use_container_width=True)
+
+        # 3D Surface Plot
+        st.subheader("3D Surface View")
+        st.markdown("**Interactive 3D visualization of SAT voltage degradation across cells and time**")
+
+        # Create 3D surface plot
+        fig_3d = go.Figure(data=[
+            go.Surface(
+                z=df_heatmap.values,
+                x=list(range(len(df_heatmap.columns))),
+                y=list(range(len(df_heatmap.index))),
+                colorscale="RdYlGn",
+                colorbar=dict(title="SAT-V %"),
+                hovertemplate="<b>%{text}</b><br>Date: %{customdata[0]}<br>SAT Voltage: %{z:.1f}%<extra></extra>",
+                text=[[df_heatmap.columns[j] for j in range(len(df_heatmap.columns))]
+                      for i in range(len(df_heatmap.index))],
+                customdata=[[[df_heatmap.index[i]] for j in range(len(df_heatmap.columns))]
+                           for i in range(len(df_heatmap.index))]
+            )
+        ])
+
+        # Update 3D layout
+        fig_3d.update_layout(
+            title=dict(
+                text=f"3D SAT Voltage Surface - {selected_pack}",
+                x=0.5,
+                font=dict(size=16)
+            ),
+            scene=dict(
+                xaxis=dict(
+                    title="Cell Number",
+                    tickmode='array',
+                    tickvals=list(range(0, len(df_heatmap.columns), max(1, len(df_heatmap.columns)//10))),
+                    ticktext=[df_heatmap.columns[i] for i in range(0, len(df_heatmap.columns), max(1, len(df_heatmap.columns)//10))]
+                ),
+                yaxis=dict(
+                    title="Time",
+                    tickmode='array',
+                    tickvals=list(range(0, len(df_heatmap.index), max(1, len(df_heatmap.index)//8))),
+                    ticktext=[df_heatmap.index[i] for i in range(0, len(df_heatmap.index), max(1, len(df_heatmap.index)//8))]
+                ),
+                zaxis=dict(
+                    title="SAT Voltage %",
+                    range=[df_heatmap.values.min()-1, df_heatmap.values.max()+1]
+                ),
+                camera=dict(
+                    eye=dict(x=1.4, y=1.4, z=0.8)
+                )
+            ),
+            width=None,
+            height=650,
+            font=dict(size=12)
+        )
+
+        st.plotly_chart(fig_3d, use_container_width=True)
+
+        # 3D Navigation tips
+        st.info("🎮 **3D Navigation:** Drag to rotate • Scroll to zoom • Hover for cell details")
 
 with tab3:
     st.subheader("Pack Voltage Degradation Trends")
@@ -429,14 +486,17 @@ with tab4:
                 # Generate fit line
                 fit_line = slope * days + intercept
 
-                # Calculate degradation metrics
-                annual_degradation = abs(slope) * 365  # % per year
-                monthly_degradation = abs(slope) * 30  # % per month
+                # Calculate degradation metrics more accurately
+                total_days = days[-1] - days[0] if len(days) > 1 else 1
+                total_degradation = abs(voltages[0] - voltages[-1])  # Total % change
+
+                # Annual degradation based on actual time span
+                annual_degradation = (total_degradation / total_days) * 365  # % per year
+                monthly_degradation = (total_degradation / total_days) * 30  # % per month
 
                 # Estimate charge cycles (assume 1 cycle per day average for BESS)
-                total_days = days[-1] - days[0] if len(days) > 1 else 1
                 estimated_cycles = total_days * 1.0  # 1 cycle/day assumption
-                degradation_per_cycle = annual_degradation / 365 if estimated_cycles > 0 else 0
+                degradation_per_cycle = total_degradation / estimated_cycles if estimated_cycles > 0 else 0
 
                 # Plot actual data
                 fig_curves.add_trace(go.Scatter(
@@ -534,11 +594,11 @@ with tab4:
                     linearity_quality = "Bedenklich"
 
             with col2:
-                # Annual degradation quality
-                if avg_annual_loss < 2.0:
+                # Annual degradation quality - updated realistic thresholds
+                if avg_annual_loss < 3.0:  # <3% per year is very good for BESS
                     st.success(f"✅ Niedrig: {avg_annual_loss:.1f}%/Jahr")
                     annual_quality = "Sehr gut"
-                elif avg_annual_loss < 5.0:
+                elif avg_annual_loss < 10.0:  # 3-10% is moderate
                     st.warning(f"⚠️ Moderat: {avg_annual_loss:.1f}%/Jahr")
                     annual_quality = "Akzeptabel"
                 else:
@@ -546,11 +606,11 @@ with tab4:
                     annual_quality = "Bedenklich"
 
             with col3:
-                # Cycle degradation quality
-                if avg_cycle_loss < 0.01:
+                # Cycle degradation quality - updated for new calculation
+                if avg_cycle_loss < 0.02:  # <0.02% per cycle is very good
                     st.success(f"✅ Niedrig: {avg_cycle_loss:.4f}%/Zyklus")
                     cycle_quality = "Sehr gut"
-                elif avg_cycle_loss < 0.02:
+                elif avg_cycle_loss < 0.05:  # 0.02-0.05% is moderate
                     st.warning(f"⚠️ Moderat: {avg_cycle_loss:.4f}%/Zyklus")
                     cycle_quality = "Akzeptabel"
                 else:

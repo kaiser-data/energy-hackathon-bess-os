@@ -70,6 +70,53 @@ IMBALANCE_THRESHOLD = 0.1   # V - significant cell imbalance
 DEGRADATION_THRESHOLD = 0.05 # V/month - significant degradation
 HOTSPOT_THRESHOLD = 5       # °C above pack average
 
+# CRITICAL: Anomaly-Preserving Aggregation Rules
+# Averaging masks single-event anomalies that can cause battery fires!
+AGGREGATION_RULES = {
+    'alarm_signals': 'MAX',       # Preserve ANY alarm occurrence (fa*, *Flag, *ErrCode)
+    'extreme_values': 'MIN_MAX',  # Keep both min/max for anomaly detection
+    'voltage_spikes': 'PERCENTILE', # 99th/1st percentiles to catch outliers
+    'temperature_events': 'MAX',   # Maximum temperatures for thermal runaway detection
+}
+
+def anomaly_aware_aggregation(series: pd.Series, signal_type: str) -> Dict[str, float]:
+    """
+    Aggregates data while preserving critical anomalies and single events.
+
+    Critical Insight: Standard mean/average loses dangerous single events:
+    - Battery fires start from single cell thermal runaway (transient event)
+    - Voltage spikes indicate imminent failure (brief but critical)
+    - Alarm flags are binary events that must be preserved (never average!)
+    """
+    if len(series) == 0:
+        return {'mean': 0, 'max': 0, 'min': 0, 'p99': 0, 'p1': 0, 'spike_count': 0}
+
+    clean_series = series.dropna()
+    if len(clean_series) == 0:
+        return {'mean': 0, 'max': 0, 'min': 0, 'p99': 0, 'p1': 0, 'spike_count': 0}
+
+    result = {
+        'mean': float(clean_series.mean()),
+        'max': float(clean_series.max()),
+        'min': float(clean_series.min()),
+        'p99': float(clean_series.quantile(0.99)),
+        'p1': float(clean_series.quantile(0.01)),
+    }
+
+    # Detect spikes/anomalies (values beyond 3 sigma)
+    if len(clean_series) > 3:
+        mean_val = clean_series.mean()
+        std_val = clean_series.std()
+        if std_val > 0:
+            outliers = np.abs(clean_series - mean_val) > (3 * std_val)
+            result['spike_count'] = int(outliers.sum())
+        else:
+            result['spike_count'] = 0
+    else:
+        result['spike_count'] = 0
+
+    return result
+
 @dataclass
 class CellMetrics:
     """Comprehensive cell health metrics"""
@@ -83,12 +130,16 @@ class CellMetrics:
     voltage_min: float
     voltage_max: float
     voltage_range: float
+    voltage_p99: float        # 99th percentile - catches voltage spikes
+    voltage_p1: float         # 1st percentile - catches voltage drops
+    voltage_spike_count: int  # Count of 3-sigma voltage anomalies
 
     # Temperature metrics
     temp_mean: float
     temp_std: float
     temp_max: float
     temp_hotspot_events: int
+    temp_spike_count: int     # Count of temperature anomalies (thermal events)
 
     # Health indicators
     degradation_rate: float  # V/month
@@ -261,7 +312,9 @@ class CellAnalyzer:
                 cell_id=voltage_series.name or "unknown",
                 pack_id=0, cell_num=0,
                 voltage_mean=0, voltage_std=0, voltage_min=0, voltage_max=0, voltage_range=0,
+                voltage_p99=0, voltage_p1=0, voltage_spike_count=0,  # NEW: anomaly fields
                 temp_mean=0, temp_std=0, temp_max=0, temp_hotspot_events=0,
+                temp_spike_count=0,  # NEW: temperature anomaly field
                 degradation_rate=0, imbalance_score=0, anomaly_score=0, neighbor_correlation=0,
                 data_points=0, start_date=datetime.now(), end_date=datetime.now(), data_quality=0
             )
@@ -273,22 +326,29 @@ class CellAnalyzer:
 
         # Voltage analysis
         v_clean = voltage_series.dropna()
-        voltage_mean = float(v_clean.mean()) if len(v_clean) > 0 else 0
+        # Use anomaly-aware aggregation for voltage metrics
+        voltage_agg = anomaly_aware_aggregation(v_clean, 'voltage')
+        voltage_mean = voltage_agg['mean']
         voltage_std = float(v_clean.std()) if len(v_clean) > 1 else 0
-        voltage_min = float(v_clean.min()) if len(v_clean) > 0 else 0
-        voltage_max = float(v_clean.max()) if len(v_clean) > 0 else 0
+        voltage_min = voltage_agg['min']
+        voltage_max = voltage_agg['max']
         voltage_range = voltage_max - voltage_min
+        voltage_p99 = voltage_agg['p99']  # Catches voltage spikes
+        voltage_p1 = voltage_agg['p1']    # Catches voltage drops
+        voltage_spike_count = voltage_agg['spike_count']  # Anomaly events
 
-        # Temperature analysis
+        # Temperature analysis with anomaly-aware aggregation
         if not temp_series.empty:
             t_clean = temp_series.dropna()
-            temp_mean = float(t_clean.mean()) if len(t_clean) > 0 else 25
+            temp_agg = anomaly_aware_aggregation(t_clean, 'temperature')
+            temp_mean = temp_agg['mean']
             temp_std = float(t_clean.std()) if len(t_clean) > 1 else 0
-            temp_max = float(t_clean.max()) if len(t_clean) > 0 else 25
+            temp_max = temp_agg['max']  # Critical: MAX temp for thermal runaway detection
+            temp_spike_count = temp_agg['spike_count']  # Temperature anomalies
             temp_hotspot_events = int((t_clean > temp_mean + HOTSPOT_THRESHOLD).sum()) if len(t_clean) > 0 else 0
         else:
             temp_mean = temp_std = temp_max = 25
-            temp_hotspot_events = 0
+            temp_hotspot_events = temp_spike_count = 0
 
         # Degradation analysis (voltage trend over time)
         degradation_rate = 0
@@ -346,10 +406,14 @@ class CellAnalyzer:
             voltage_min=voltage_min,
             voltage_max=voltage_max,
             voltage_range=voltage_range,
+            voltage_p99=voltage_p99,           # NEW: voltage spike detection
+            voltage_p1=voltage_p1,             # NEW: voltage drop detection
+            voltage_spike_count=voltage_spike_count,  # NEW: anomaly count
             temp_mean=temp_mean,
             temp_std=temp_std,
             temp_max=temp_max,
             temp_hotspot_events=temp_hotspot_events,
+            temp_spike_count=temp_spike_count,  # NEW: temperature anomaly count
             degradation_rate=degradation_rate,
             imbalance_score=imbalance_score,
             anomaly_score=anomaly_score,

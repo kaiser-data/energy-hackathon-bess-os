@@ -715,17 +715,30 @@ async def get_pack_comparison(
         for pack_id, summary in pack_summaries.items():
             status, emoji, description = real_analyzer.classify_soh(summary.pack_soh)
 
-            # SOH degradation timeline - use ACTUAL data timespan (2024-02-27 to 2025-06-13)
-            # This is the real monitoring period from the CSV files: 15.5 months, 472 days
+            # SOH degradation timeline - use ACTUAL data timespan from CSV files
+            # Real monitoring period: Oct 4, 2023 to June 13, 2025 = 20.3 months
             from datetime import datetime
-            actual_start = datetime(2024, 2, 27)  # First data point in CSV files
+            actual_start = datetime(2023, 10, 4)  # First data point in CSV files
             actual_end = datetime(2025, 6, 13)    # Last data point in CSV files
-            actual_days = (actual_end - actual_start).days  # 472 days
-            months_in_service = int(actual_days / 30.44)    # 15.5 months
+            actual_days = (actual_end - actual_start).days  # 618 days
+            months_in_service = int(actual_days / 30.44)    # 20.3 months ≈ 20 months
 
-            degradation_rate_per_year = summary.degradation_rate * 12
-            total_degradation = 100.0 - summary.pack_soh
-            expected_eol_months = max(12, int((summary.pack_soh - 80) / (degradation_rate_per_year / 12)))
+            # Calculate actual degradation from the 20.3 months of real data
+            total_degradation = 100.0 - summary.pack_soh  # Current degradation amount
+
+            # Fix EOL calculation using realistic approach based on actual observed degradation
+            # If we've degraded total_degradation% in months_in_service months,
+            # how long until we reach 80% (20% total degradation)?
+            if total_degradation > 0 and months_in_service > 0:
+                actual_degradation_rate_per_month = total_degradation / months_in_service
+                degradation_rate_per_year = actual_degradation_rate_per_month * 12
+                remaining_degradation_allowed = summary.pack_soh - 80.0  # How much more we can degrade
+                expected_eol_months = max(12, int(remaining_degradation_allowed / actual_degradation_rate_per_month))
+            else:
+                # Fallback to cell analyzer degradation rate if no observed degradation
+                degradation_rate_per_year = summary.degradation_rate * 12  # summary.degradation_rate is %/month
+                actual_degradation_rate_per_month = summary.degradation_rate
+                expected_eol_months = 120  # Default if no degradation detected
 
             packs_data[f"Pack {pack_id}"] = {
                 "pack_id": pack_id,
@@ -741,7 +754,7 @@ async def get_pack_comparison(
                 "average_voltage": summary.average_voltage,
                 "voltage_imbalance": summary.voltage_imbalance,
                 "avg_temperature": summary.avg_temperature,
-                "degradation_rate": summary.degradation_rate,
+                "degradation_rate": actual_degradation_rate_per_month if total_degradation > 0 and months_in_service > 0 else summary.degradation_rate,
                 "worst_cell": summary.worst_cell,
                 "best_cell": summary.best_cell,
                 "healthy_cells": summary.healthy_cells,

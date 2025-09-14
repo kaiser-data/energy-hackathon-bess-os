@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-API = st.secrets.get("API_URL", "http://localhost:8000")
+API = st.secrets.get("API_URL", "http://127.0.0.1:8000")
 st.title("🔀 Compare Two Systems")
 
 @st.cache_data(ttl=60)

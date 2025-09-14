@@ -207,30 +207,36 @@ def create_fast_pack_radar(comparison_data: dict) -> go.Figure:
     return fig
 
 def create_fast_heatmap(heatmap_data: dict, pack_id: int) -> go.Figure:
-    """Ultra-fast heatmap with optimized rendering"""
+    """Ultra-fast heatmap with linear cell arrangement (cells in a line)"""
     if not heatmap_data.get("heatmap_data"):
         return go.Figure().add_annotation(text="No cell data", showarrow=False)
 
     data = heatmap_data["heatmap_data"]
     metric = heatmap_data["metric"]
 
-    # Create matrix super fast
-    z_matrix = np.zeros((4, 13))
-    hover_text = np.empty((4, 13), dtype=object)
+    # Create linear matrix: 1 row × 52 columns (actual physical layout)
+    z_matrix = np.zeros((1, 52))
+    hover_text = np.empty((1, 52), dtype=object)
+    cell_labels = []
 
     for cell_data in data:
-        x, y = int(cell_data["x"]), int(cell_data["y"])
-        if 0 <= y < 4 and 0 <= x < 13:  # Safety check
-            z_matrix[y, x] = cell_data["value"]
-            hover_text[y, x] = f"Cell {cell_data['cell_num']}: {cell_data['value']:.3f}"
+        cell_num = int(cell_data["cell_num"])
+        col = cell_num - 1  # Convert to 0-based indexing (cell 1 → col 0)
 
-    # Fast colorscale selection
+        if 0 <= col < 52:  # Safety check
+            z_matrix[0, col] = cell_data["value"]
+            hover_text[0, col] = f"Cell {cell_num}<br>{metric}: {cell_data['value']:.3f}<br>Position: {col+1}/52"
+
+    # Create cell position labels
+    cell_labels = [f"C{i+1}" for i in range(52)]
+
+    # Fast colorscale selection with appropriate ranges
     colorscales = {
-        "voltage": "Viridis",
-        "temperature": "Hot",
-        "degradation": "Reds"
+        "voltage": ("Viridis", [3.0, 3.6]),
+        "temperature": ("Hot", [20, 60]),
+        "degradation": ("Reds", [0, 1])
     }
-    colorscale = colorscales.get(metric, "RdYlBu_r")
+    colorscale, value_range = colorscales.get(metric, ("RdYlBu_r", [None, None]))
 
     fig = go.Figure(data=go.Heatmap(
         z=z_matrix,
@@ -239,31 +245,71 @@ def create_fast_heatmap(heatmap_data: dict, pack_id: int) -> go.Figure:
         colorscale=colorscale,
         showscale=True,
         colorbar=dict(
-            title=f"{metric.title()}"
-        )
+            title=f"{metric.title()}",
+            x=1.02
+        ),
+        zmin=value_range[0],
+        zmax=value_range[1]
     ))
 
     fig.update_layout(
-        title=f"🗺️ Pack {pack_id} - {metric.title()} Heatmap",
-        xaxis=dict(title="Cell Column", dtick=1, range=[-0.5, 12.5]),
-        yaxis=dict(title="Cell Row", dtick=1, range=[-0.5, 3.5]),
-        height=300,
-        width=700,
-        template="plotly_white"
+        title=f"🗺️ Pack {pack_id} - {metric.title()} Linear Layout (52 Cells in Line)",
+        xaxis=dict(
+            title="Cell Position →",
+            tickmode="array",
+            tickvals=list(range(0, 52, 4)),  # Show every 4th cell
+            ticktext=[f"C{i+1}" for i in range(0, 52, 4)],
+            range=[-0.5, 51.5],
+            side="bottom"
+        ),
+        yaxis=dict(
+            title="Pack",
+            tickmode="array",
+            tickvals=[0],
+            ticktext=[f"Pack {pack_id}"],
+            range=[-0.5, 0.5],
+            showticklabels=True
+        ),
+        height=200,  # Shorter for single row
+        width=1000,  # Wider to accommodate 52 cells
+        template="plotly_white",
+        margin=dict(l=60, r=100, t=60, b=60)  # Extra right margin for colorbar
     )
+
+    # Add strategic cell number annotations
+    key_positions = [0, 12, 25, 38, 51]  # Strategic positions along the line
+    annotations = []
+    for pos in key_positions:
+        if pos < 52 and not np.isnan(z_matrix[0, pos]):
+            annotations.append(
+                dict(
+                    x=pos,
+                    y=0,
+                    text=f"C{pos+1}",
+                    showarrow=False,
+                    font=dict(color="white", size=9, family="Arial Black"),
+                    bgcolor="rgba(0,0,0,0.7)",
+                    bordercolor="white",
+                    borderwidth=1,
+                    borderpad=2
+                )
+            )
+
+    fig.update_layout(annotations=annotations)
 
     return fig
 
 def create_fast_3d_surface(system: str, pack_id: int) -> go.Figure:
-    """Fast 3D surface plot for cell visualization"""
-    # Create synthetic surface for fast demo
-    x = np.arange(13)  # 13 columns
-    y = np.arange(4)   # 4 rows
+    """Fast 3D surface plot for cell visualization - linear layout"""
+    # Create linear surface for actual physical layout (52 cells in a line)
+    x = np.arange(52)  # 52 cells in line (columns 0-51)
+    y = np.array([0])  # Single row (actual physical layout)
     X, Y = np.meshgrid(x, y)
 
-    # Simulate voltage surface with some variation
+    # Simulate voltage surface with linear variation pattern
     base_voltage = 3.7
-    Z = base_voltage + 0.1 * np.sin(X/2) + 0.05 * np.cos(Y) + np.random.normal(0, 0.02, X.shape)
+    # Create more realistic linear patterns for cells in a line
+    Z = base_voltage + 0.05 * np.sin(X/10) + np.random.normal(0, 0.02, X.shape)
 
     fig = go.Figure(data=[go.Surface(
         x=X, y=Y, z=Z,
@@ -272,11 +318,15 @@ def create_fast_3d_surface(system: str, pack_id: int) -> go.Figure:
     )])
 
     fig.update_layout(
-        title=f"🌐 Pack {pack_id} 3D Voltage Surface",
+        title=f"🌐 Pack {pack_id} Linear 3D Voltage Surface",
         scene=dict(
-            xaxis_title="Cell Column",
-            yaxis_title="Cell Row",
-            zaxis_title="Voltage (V)"
+            xaxis_title="Cell Position (1-52)",
+            yaxis_title="Physical Row",
+            zaxis_title="Voltage (V)",
+            # Optimize view for linear arrangement
+            camera=dict(
+                eye=dict(x=1.5, y=1.5, z=1.2)
+            )
         ),
         height=500,
         template="plotly_white"

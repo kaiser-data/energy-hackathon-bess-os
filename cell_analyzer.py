@@ -294,10 +294,25 @@ class CellAnalyzer:
         degradation_rate = 0
         if len(v_clean) > 100:  # Need sufficient data
             try:
-                # Calculate monthly trend
-                time_months = (v_clean.index - v_clean.index[0]).total_seconds() / (30 * 24 * 3600)
-                slope, _, _, _, _ = simple_linear_regression(time_months, v_clean.values)
-                degradation_rate = float(slope) # V/month
+                # Calculate time span in days
+                timespan_days = (v_clean.index[-1] - v_clean.index[0]).total_seconds() / 86400
+
+                # Only calculate degradation for significant time periods
+                if timespan_days >= 30:  # At least 30 days for meaningful trend
+                    # Calculate monthly trend
+                    time_months = (v_clean.index - v_clean.index[0]).total_seconds() / (30 * 24 * 3600)
+                    slope, _, r_value, _, _ = simple_linear_regression(time_months, v_clean.values)
+
+                    # Only use trend if correlation is meaningful (|r| > 0.3)
+                    if abs(r_value) > 0.3:
+                        degradation_rate = float(slope)  # V/month
+                    else:
+                        degradation_rate = 0  # Trend not significant
+                else:
+                    # For short periods, use conservative estimate based on voltage variance
+                    voltage_variance = v_clean.std()
+                    # Conservative degradation estimate: higher variance = more degradation
+                    degradation_rate = min(voltage_variance * 0.01, 0.001)  # Cap at 1mV/month
             except Exception:
                 pass
 
@@ -384,11 +399,19 @@ class CellAnalyzer:
         age_years = timespan_days / 365.25
 
         # 1. Capacity fade from aging (calendar aging)
-        # Typical Li-ion: 2-3% per year base degradation
-        calendar_fade = min(age_years * 2.5, 15.0)  # Cap at 15% for calendar aging
+        # For short analysis periods, use minimal calendar aging
+        if timespan_days < 30:
+            # Very conservative for short periods - mainly voltage imbalance matters
+            calendar_fade = 0.0
+        elif timespan_days < 90:
+            # Conservative aging for 1-3 months
+            calendar_fade = min(age_years * 1.0, 3.0)  # Reduced aging rate
+        else:
+            # Standard aging for longer periods
+            calendar_fade = min(age_years * 2.5, 15.0)  # Cap at 15% for calendar aging
 
-        # 2. Cycle degradation
-        if cycles > 0:
+        # 2. Cycle degradation (more conservative for short periods)
+        if cycles > 0 and timespan_days >= 30:
             cycle_rate = cycles / age_years if age_years > 0 else cycles
             # Industry standard: 0.02-0.05% per cycle depending on DOD
             cycle_fade = min(cycles * 0.035, 20.0)  # 3.5% per 100 cycles, cap at 20%
@@ -406,15 +429,17 @@ class CellAnalyzer:
         else:
             imbalance_penalty = 0.0
 
-        # 4. Cell degradation variance penalty
-        if len(cell_metrics) > 1:
+        # 4. Cell degradation variance penalty (only for long-term data)
+        variance_penalty = 0.0
+        if len(cell_metrics) > 1 and timespan_days >= 30:  # Only penalize for significant time periods
             degradation_rates = [abs(m.degradation_rate) for m in cell_metrics]
             degradation_std = np.std(degradation_rates)
 
             # High variance in degradation = pack issues
             variance_penalty = min(degradation_std * 100, 8.0)
-        else:
-            variance_penalty = 0.0
+        elif timespan_days < 30:
+            # For short periods, minimal variance penalty based on voltage spread
+            variance_penalty = min(voltage_imbalance * 5, 2.0)  # Conservative penalty
 
         # 5. Temperature stress (if available)
         temp_penalty = 0.0

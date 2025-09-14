@@ -1517,26 +1517,56 @@ async def get_real_sat_voltage(
                     chunk = chunk.sort_values('ts')
 
                     # Detect charge cycles: look for sustained voltage increases
-                    # Calculate voltage derivative (rate of change)
+                    # Calculate voltage derivative (rate of change) with proper time interval handling
                     chunk['voltage_diff'] = chunk['voltage'].diff()
                     chunk['time_diff'] = chunk['ts'].diff().dt.total_seconds() / 60  # minutes
+
+                    # Handle variable time intervals - avoid division by zero and filter out outliers
+                    chunk = chunk[chunk['time_diff'] > 0]  # Remove any zero or negative time intervals
+                    chunk = chunk[chunk['time_diff'] <= 60]  # Remove gaps > 1 hour (likely data breaks)
+
+                    if chunk.empty:
+                        continue
+
                     chunk['voltage_rate'] = chunk['voltage_diff'] / chunk['time_diff']  # V/min
 
-                    # Identify charging phases: sustained positive voltage rate > 0.0001 V/min
-                    charging_threshold = 0.0001  # 0.1mV/min minimum charging rate
+                    # Adaptive charging threshold based on sampling interval
+                    # For 1-min samples: 0.0001 V/min, for 5-min samples: 0.0005 V/min, etc.
+                    median_interval = chunk['time_diff'].median()
+                    base_threshold = 0.0001  # 0.1mV/min for 1-minute sampling
+                    charging_threshold = base_threshold * median_interval  # Scale with interval
+
                     chunk['is_charging'] = chunk['voltage_rate'] > charging_threshold
 
-                    # Find end of charge cycles (transitions from charging to not charging)
-                    chunk['charge_cycle_end'] = (chunk['is_charging'].shift(1) & ~chunk['is_charging'])
+                    logger.debug(f"Cell {cell_key}: median interval {median_interval:.1f}min, threshold {charging_threshold:.6f}V/min")
 
-                    # Extract saturation voltages (voltage at end of charge cycles)
-                    charge_ends = chunk[chunk['charge_cycle_end']].copy()
+                    # Find end of charge cycles with improved detection for variable intervals
+                    # Use rolling window to smooth out noise in irregular sampling
+                    window_size = max(3, int(10 / median_interval))  # ~10 minutes worth of data
+                    chunk['is_charging_smooth'] = chunk['is_charging'].rolling(window=window_size, center=True).mean() > 0.5
 
-                    if len(charge_ends) > 0:
-                        for _, end_point in charge_ends.iterrows():
+                    # Detect charge cycle endpoints: transitions from charging to not charging
+                    chunk['charge_cycle_end'] = (chunk['is_charging_smooth'].shift(1) & ~chunk['is_charging_smooth'])
+
+                    # Also detect voltage peaks (local maxima) as potential SAT voltage points
+                    chunk['is_local_max'] = (
+                        (chunk['voltage'].shift(1) < chunk['voltage']) &
+                        (chunk['voltage'].shift(-1) < chunk['voltage'])
+                    )
+
+                    # Combine charge cycle ends with voltage peaks for more robust detection
+                    chunk['is_sat_point'] = chunk['charge_cycle_end'] | (
+                        chunk['is_local_max'] & (chunk['voltage'] > chunk['voltage'].quantile(0.8))
+                    )
+
+                    # Extract saturation voltages
+                    sat_points = chunk[chunk['is_sat_point']].copy()
+
+                    if len(sat_points) > 0:
+                        for _, sat_point in sat_points.iterrows():
                             sat_voltage_points.append({
-                                'timestamp': end_point['ts'],
-                                'sat_voltage': end_point['voltage']
+                                'timestamp': sat_point['ts'],
+                                'sat_voltage': sat_point['voltage']
                             })
 
                 # Process collected SAT voltage points
@@ -1606,7 +1636,7 @@ async def get_real_sat_voltage(
             "total_cells": len(sat_voltage_data),
             "system": bess_system,
             "data_source": "real_cell_voltages",
-            "calculation_method": "real_charge_cycle_analysis_with_voltage_derivatives"
+            "calculation_method": "adaptive_charge_cycle_analysis_with_variable_time_intervals"
         }
 
         logger.info(f"Real SAT voltage calculation complete: {len(sat_voltage_data)} cells, {len(all_timestamps)} days")

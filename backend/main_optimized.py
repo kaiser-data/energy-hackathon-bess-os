@@ -1468,9 +1468,9 @@ async def get_real_sat_voltage(
         sat_voltage_data = {}
         processed_count = 0
 
-        # Process first 10 cells for testing, then scale up
+        # Process more cells now that the algorithm is working
         processed_files = 0
-        max_files_to_process = min(10, len(cell_voltage_files))
+        max_files_to_process = min(50, len(cell_voltage_files))  # Process 50 cells for better coverage
 
         for cell_file in cell_voltage_files[:max_files_to_process]:
             try:
@@ -1488,7 +1488,7 @@ async def get_real_sat_voltage(
                 logger.info(f"Processing {cell_key} from {filename}")
 
                 # Read voltage data in chunks for memory efficiency
-                chunk_size = 50000  # Process 50k rows at a time
+                chunk_size = 100000  # Process 100k rows at a time for better performance
                 sat_voltage_points = []
 
                 # Process file in chunks

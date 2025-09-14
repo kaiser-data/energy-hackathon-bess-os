@@ -20,6 +20,7 @@ import time
 import hashlib
 import logging
 import asyncio
+import json
 from pathlib import Path
 
 # Configure logger
@@ -27,7 +28,8 @@ logger = logging.getLogger(__name__)
 from typing import Dict, Optional, List, Tuple, Any
 from datetime import datetime, timedelta
 from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
@@ -1429,24 +1431,51 @@ async def debug_cell_files(bess_system: str):
 # Simple cache for real SAT voltage data
 _real_sat_cache = {}
 
+# Cache for raw voltage plotting data
+_raw_voltage_cache = {}
+
 @app.get("/cell/system/{bess_system}/real-sat-voltage")
 async def get_real_sat_voltage(
     bess_system: str,
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
-    time_resolution: str = Query("1d", description="Time resolution (1d only for now)")
+    time_resolution: str = Query("1d", description="Time resolution (1d only for now)"),
+    demo_mode: bool = Query(False, description="Demo mode: strategic sampling for consistent performance")
 ):
     """Get real SAT voltage calculated directly from individual cell voltage files
 
     SAT voltage = maximum voltage achieved during charge cycles
     Calculated from actual BMS cell voltage data, not synthetic health metrics
     """
-    # Check cache first (cache for 5 minutes)
-    cache_key = f"{bess_system}_{start}_{end}_{time_resolution}"
+    # Check FILE-BASED cache first for instant response
+    demo_cache_dir = Path("backend/.demo_cache")
+    demo_cache_dir.mkdir(exist_ok=True)
+
+    # Create a stable cache filename based on system and mode
+    cache_filename = f"{bess_system}_{'demo' if demo_mode else 'complete'}_{time_resolution}.json"
+    cache_file = demo_cache_dir / cache_filename
+
+    # Try to load from file cache first (instant response)
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'r') as f:
+                cached_data = json.load(f)
+                # Check if cache is recent (within 24 hours for persistent cache)
+                cache_age = datetime.now().timestamp() - cached_data.get('cached_at', 0)
+                if cache_age < 86400:  # 24 hour cache for file-based storage
+                    logger.info(f"Returning file-cached {'demo' if demo_mode else 'complete'} SAT voltage data for {bess_system}")
+                    # Convert timestamp strings back to datetime for consistency
+                    result = cached_data['data']
+                    return result
+        except Exception as e:
+            logger.warning(f"Failed to load cache file {cache_file}: {e}")
+
+    # Check memory cache as fallback
+    cache_key = f"{bess_system}_{start}_{end}_{time_resolution}_demo_{demo_mode}"
     if cache_key in _real_sat_cache:
         cached_result, cached_time = _real_sat_cache[cache_key]
-        if datetime.now().timestamp() - cached_time < 300:  # 5 minute cache
-            logger.info(f"Returning cached real SAT voltage data for {bess_system}")
+        if datetime.now().timestamp() - cached_time < 3600:  # 60 minute memory cache
+            logger.info(f"Returning memory-cached real SAT voltage data for {bess_system}")
             return cached_result
 
     try:
@@ -1475,154 +1504,248 @@ async def get_real_sat_voltage(
 
         logger.info(f"Found {len(cell_voltage_files)} individual cell voltage files")
 
-        # Process each cell file to calculate daily SAT voltage
+        # Process each cell file to calculate daily SAT voltage using parallel processing
         sat_voltage_data = {}
         processed_count = 0
 
-        # Balance between data coverage and response time
-        # Start with fewer cells for better user experience, can be increased later
-        processed_files = 0
-        max_files_to_process = min(20, len(cell_voltage_files))  # Process 20 cells for balanced coverage/speed
+        # INTELLIGENT PROCESSING: Demo mode vs Complete coverage
+        total_cells = len(cell_voltage_files)
 
-        for cell_file in cell_voltage_files[:max_files_to_process]:
-            try:
-                # Extract cell identifier from filename (e.g., bms1_p1_v1.csv -> pack_1_cell_1)
+        if demo_mode:
+            # DEMO MODE: Ultra-light sampling for instant showcase performance
+            # Sample only 1 representative cell per pack (5 cells total) for blazing fast results
+            selected_files = []
+
+            # Group files by pack for strategic sampling
+            pack_files = {}
+            for cell_file in cell_voltage_files:
                 filename = cell_file.name
                 parts = filename.replace('.csv', '').split('_')
-                if len(parts) >= 3:
+                if len(parts) >= 2:
                     pack_num = parts[1][1:]  # p1 -> 1
-                    cell_num = parts[2][1:]  # v29 -> 29
-                    cell_key = f"pack_{pack_num}_cell_{cell_num}"
-                else:
-                    logger.warning(f"Invalid filename format: {filename}, parts: {parts}")
-                    continue  # Skip invalid filenames
+                    if pack_num not in pack_files:
+                        pack_files[pack_num] = []
+                    pack_files[pack_num].append(cell_file)
 
-                logger.info(f"Processing {cell_key} from {filename}")
+            # Select ONLY 1 representative cell from each pack (middle cell for best representation)
+            for pack_num in sorted(pack_files.keys())[:5]:  # Max 5 packs
+                pack_cells = sorted(pack_files[pack_num])
+                pack_size = len(pack_cells)
+                if pack_size > 0:
+                    # Take ONLY the middle cell as most representative
+                    middle_index = pack_size // 2
+                    selected_files.append(pack_cells[middle_index])
 
-                # Read voltage data in chunks for memory efficiency
-                chunk_size = 100000  # Process 100k rows at a time for better performance
+            max_files_to_process = len(selected_files)
+            logger.info(f"DEMO MODE: Ultra-light sampling of {max_files_to_process} cells (1 per pack) for instant showcase performance")
+
+        elif total_cells >= 260:  # Full BESS system detected (5 packs × 52 cells)
+            # COMPLETE COVERAGE: Process ALL 260 cells
+            selected_files = cell_voltage_files
+            max_files_to_process = len(selected_files)
+            logger.info(f"COMPLETE COVERAGE: Processing ALL {max_files_to_process} cells (5 packs × 52 cells)")
+        else:
+            # Smaller system - process all available
+            max_files_to_process = total_cells
+            selected_files = cell_voltage_files
+            logger.info(f"BESS System: Processing all {max_files_to_process} available cells")
+
+        logger.info(f"Starting parallel processing of {len(selected_files)} cells")
+
+        # Use ThreadPoolExecutor - optimize workers based on mode
+        if demo_mode:
+            max_workers = min(2, len(selected_files))  # Minimal workers for instant demo response
+        else:
+            max_workers = min(12, len(selected_files))  # Maximum parallel workers for complete coverage
+
+        def process_single_cell(cell_file_path):
+            """Process a single cell voltage file - designed for parallel execution"""
+            try:
+                # Extract cell identifier from filename
+                filename = cell_file_path.name
+                parts = filename.replace('.csv', '').split('_')
+                if len(parts) < 3:
+                    return None, f"Invalid filename format: {filename}, parts: {parts}"
+
+                pack_num = parts[1][1:]  # p1 -> 1
+                cell_num = parts[2][1:]  # v29 -> 29
+                cell_key = f"pack_{pack_num}_cell_{cell_num}"
+
+                # Ultra-optimized chunk processing for 260-cell analysis
+                # Special optimization for ZHPESS232A230007 (smaller files need smaller chunks)
+                chunk_size = 10000 if 'ZHPESS232A230007' in str(cell_file_path) else 15000
                 sat_voltage_points = []
 
-                # Process file in chunks
-                for chunk in pd.read_csv(cell_file, chunksize=chunk_size):
-                    if chunk.empty or len(chunk.columns) < 2:
-                        continue
+                # Process file in chunks with enhanced error handling
+                try:
+                    for chunk in pd.read_csv(cell_file_path, chunksize=chunk_size):
+                        if chunk.empty or len(chunk.columns) < 2:
+                            continue
 
-                    # Parse timestamps and voltage values
-                    chunk['ts'] = pd.to_datetime(chunk.iloc[:, 0], errors='coerce')
-                    chunk['voltage'] = pd.to_numeric(chunk.iloc[:, 1], errors='coerce')
-                    chunk = chunk.dropna()
+                        # Ultra-fast column parsing with aggressive filtering
+                        chunk['ts'] = pd.to_datetime(chunk.iloc[:, 0], errors='coerce')
+                        chunk['voltage'] = pd.to_numeric(chunk.iloc[:, 1], errors='coerce')
 
-                    if chunk.empty:
-                        continue
+                        # Drop invalid rows immediately
+                        chunk = chunk.dropna(subset=['ts', 'voltage'])
 
-                    # Apply date filtering
-                    if start_dt:
-                        chunk = chunk[chunk['ts'] >= start_dt]
-                    if end_dt:
-                        chunk = chunk[chunk['ts'] <= end_dt]
+                        # Aggressive outlier filtering for Li-ion cells (tighter range)
+                        chunk = chunk[(chunk['voltage'] > 3.0) & (chunk['voltage'] < 4.1)]
 
-                    if chunk.empty:
-                        continue
+                        # Skip chunks with insufficient data points
+                        if len(chunk) < 10:
+                            continue
 
-                    # Sort by timestamp
-                    chunk = chunk.sort_values('ts')
+                        # Aggressive sampling for 260-cell processing
+                        if len(chunk) > 5000:
+                            chunk = chunk.iloc[::5, :]  # Take every 5th row for speed
+                        elif len(chunk) > 15000:
+                            chunk = chunk.iloc[::10, :]  # Take every 10th row for very large chunks
 
-                    # Detect charge cycles: look for sustained voltage increases
-                    # Calculate voltage derivative (rate of change) with proper time interval handling
-                    chunk['voltage_diff'] = chunk['voltage'].diff()
-                    chunk['time_diff'] = chunk['ts'].diff().dt.total_seconds() / 60  # minutes
+                        if chunk.empty:
+                            continue
 
-                    # Handle variable time intervals - avoid division by zero and filter out outliers
-                    chunk = chunk[chunk['time_diff'] > 0]  # Remove any zero or negative time intervals
-                    chunk = chunk[chunk['time_diff'] <= 60]  # Remove gaps > 1 hour (likely data breaks)
+                        # Efficient date filtering
+                        if start_dt:
+                            chunk = chunk[chunk['ts'] >= start_dt]
+                        if end_dt:
+                            chunk = chunk[chunk['ts'] <= end_dt]
 
-                    if chunk.empty:
-                        continue
+                        if chunk.empty:
+                            continue
 
-                    chunk['voltage_rate'] = chunk['voltage_diff'] / chunk['time_diff']  # V/min
+                        # Sort by timestamp (required for time-series analysis)
+                        chunk = chunk.sort_values('ts')
 
-                    # Adaptive charging threshold based on sampling interval
-                    # For 1-min samples: 0.0001 V/min, for 5-min samples: 0.0005 V/min, etc.
-                    median_interval = chunk['time_diff'].median()
-                    base_threshold = 0.0001  # 0.1mV/min for 1-minute sampling
-                    charging_threshold = base_threshold * median_interval  # Scale with interval
+                        # Optimized charge cycle detection
+                        chunk['voltage_diff'] = chunk['voltage'].diff()
+                        chunk['time_diff'] = chunk['ts'].diff().dt.total_seconds() / 60  # minutes
 
-                    chunk['is_charging'] = chunk['voltage_rate'] > charging_threshold
+                        # Aggressive time interval filtering for performance
+                        chunk = chunk[(chunk['time_diff'] > 0) & (chunk['time_diff'] <= 30)]  # Tighter window
 
-                    logger.debug(f"Cell {cell_key}: median interval {median_interval:.1f}min, threshold {charging_threshold:.6f}V/min")
+                        if chunk.empty:
+                            continue
 
-                    # Find end of charge cycles with improved detection for variable intervals
-                    # Use rolling window to smooth out noise in irregular sampling
-                    window_size = max(3, int(10 / median_interval))  # ~10 minutes worth of data
-                    chunk['is_charging_smooth'] = chunk['is_charging'].rolling(window=window_size, center=True).mean() > 0.5
+                        chunk['voltage_rate'] = chunk['voltage_diff'] / chunk['time_diff']  # V/min
 
-                    # Detect charge cycle endpoints: transitions from charging to not charging
-                    chunk['charge_cycle_end'] = (chunk['is_charging_smooth'].shift(1) & ~chunk['is_charging_smooth'])
+                        # Fast adaptive charging detection
+                        median_interval = chunk['time_diff'].median()
+                        base_threshold = 0.0002  # Slightly higher threshold for noise reduction
+                        charging_threshold = base_threshold * max(1.0, median_interval)  # Scale with interval
 
-                    # Also detect voltage peaks (local maxima) as potential SAT voltage points
-                    chunk['is_local_max'] = (
-                        (chunk['voltage'].shift(1) < chunk['voltage']) &
-                        (chunk['voltage'].shift(-1) < chunk['voltage'])
-                    )
+                        chunk['is_charging'] = chunk['voltage_rate'] > charging_threshold
 
-                    # Combine charge cycle ends with voltage peaks for more robust detection
-                    chunk['is_sat_point'] = chunk['charge_cycle_end'] | (
-                        chunk['is_local_max'] & (chunk['voltage'] > chunk['voltage'].quantile(0.8))
-                    )
+                        # Streamlined SAT voltage point detection
+                        window_size = max(3, int(5 / max(1, median_interval)))  # Smaller window for speed
+                        chunk['is_charging_smooth'] = chunk['is_charging'].rolling(window=window_size, center=True).mean() > 0.5
 
-                    # Extract saturation voltages
-                    sat_points = chunk[chunk['is_sat_point']].copy()
+                        # Combined detection: charge cycle ends + voltage peaks
+                        chunk['charge_cycle_end'] = (chunk['is_charging_smooth'].shift(1) & ~chunk['is_charging_smooth'])
+                        chunk['is_local_max'] = (
+                            (chunk['voltage'].shift(1) < chunk['voltage']) &
+                            (chunk['voltage'].shift(-1) < chunk['voltage'])
+                        )
 
-                    if len(sat_points) > 0:
-                        for _, sat_point in sat_points.iterrows():
-                            sat_voltage_points.append({
-                                'timestamp': sat_point['ts'],
-                                'sat_voltage': sat_point['voltage']
-                            })
+                        # Fast quantile calculation for peak detection
+                        voltage_80th = chunk['voltage'].quantile(0.8)
+                        chunk['is_sat_point'] = chunk['charge_cycle_end'] | (
+                            chunk['is_local_max'] & (chunk['voltage'] > voltage_80th)
+                        )
 
-                # Process collected SAT voltage points
+                        # Extract SAT points
+                        sat_points = chunk[chunk['is_sat_point']].copy()
+
+                        if len(sat_points) > 0:
+                            # Vectorized append for better performance
+                            for _, sat_point in sat_points.iterrows():
+                                sat_voltage_points.append({
+                                    'timestamp': sat_point['ts'],
+                                    'sat_voltage': sat_point['voltage']
+                                })
+
+                except pd.errors.EmptyDataError:
+                    return None, f"Empty or malformed CSV file: {cell_key}"
+                except pd.errors.ParserError as e:
+                    return None, f"CSV parsing error for {cell_key}: {str(e)}"
+                except MemoryError:
+                    return None, f"Out of memory processing {cell_key} - file too large"
+                except Exception as chunk_error:
+                    return None, f"Chunk processing error for {cell_key}: {str(chunk_error)[:100]}"
+
+                # Fast daily aggregation
                 if sat_voltage_points:
-                    # Convert to DataFrame and group by day
                     sat_df = pd.DataFrame(sat_voltage_points)
                     sat_df['date'] = sat_df['timestamp'].dt.date
 
-                    # Get the highest SAT voltage per day (best charge cycle of the day)
+                    # Daily maximum SAT voltage
                     daily_sat = sat_df.groupby('date').agg({
                         'sat_voltage': 'max',
                         'timestamp': 'first'
                     }).reset_index()
 
-                    # Create time series for frontend
-                    if len(daily_sat) > 1:
+                    if len(daily_sat) >= 2:  # Need at least 2 points for trends
                         baseline_voltage = daily_sat['sat_voltage'].iloc[0]
-                        cell_time_series = []
 
+                        # Vectorized calculation
+                        daily_sat['voltage_percentage'] = (daily_sat['sat_voltage'] / baseline_voltage * 100).round(2)
+
+                        cell_time_series = []
                         for _, row in daily_sat.iterrows():
-                            sat_voltage = row['sat_voltage']
-                            voltage_percentage = round((sat_voltage / baseline_voltage) * 100, 2)
                             cell_time_series.append({
                                 "timestamp": row['date'].strftime('%Y-%m-%d'),
-                                "sat_voltage": round(sat_voltage, 4),
-                                "voltage_percentage": voltage_percentage
+                                "sat_voltage": round(row['sat_voltage'], 4),
+                                "voltage_percentage": row['voltage_percentage']
                             })
 
-                        sat_voltage_data[cell_key] = cell_time_series
-                        processed_count += 1
-
-                        logger.info(f"Cell {cell_key}: Found {len(sat_voltage_points)} charge cycles, {len(daily_sat)} days of SAT data")
+                        return cell_key, cell_time_series
                     else:
-                        logger.warning(f"Cell {cell_key}: Insufficient SAT voltage data")
+                        return None, f"Cell {cell_key}: Insufficient SAT data - need ≥2 days, got {len(daily_sat)}"
                 else:
-                    logger.warning(f"Cell {cell_key}: No charge cycles detected")
-
-                processed_files += 1
+                    return None, f"Cell {cell_key}: No charge cycles detected"
 
             except Exception as e:
-                logger.error(f"Failed to process {cell_file.name}: {str(e)} | File size: {cell_file.stat().st_size} bytes")
-                import traceback
-                logger.error(f"Full traceback: {traceback.format_exc()}")
-                continue
+                return None, f"Failed to process {filename}: {str(e)}"
+
+        # Execute parallel processing
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_file = {executor.submit(process_single_cell, cell_file): cell_file
+                            for cell_file in selected_files}
+
+            # Collect results with enhanced error handling and timeouts
+            timeout_count = 0
+            error_count = 0
+            success_count = 0
+
+            for future in as_completed(future_to_file):
+                cell_file = future_to_file[future]
+                try:
+                    # Dynamic timeout based on system (ZHPESS232A230007 needs more time for first-time processing)
+                    timeout_val = 30 if 'ZHPESS232A230007' in str(future_to_file[future]) else 20
+                    cell_key, result = future.result(timeout=timeout_val)
+                    if cell_key and result:
+                        sat_voltage_data[cell_key] = result
+                        processed_count += 1
+                        success_count += 1
+                        logger.info(f"✅ {cell_key}: {len(result)} days processed")
+                    else:
+                        logger.warning(f"⚠️ {cell_file.name}: {result}")
+                        error_count += 1
+                except TimeoutError:
+                    timeout_count += 1
+                    logger.error(f"⏰ {cell_file.name}: Processing timeout (>20s)")
+                    continue
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"❌ {cell_file.name}: {str(e)[:100]}")
+                    continue
+
+                # Circuit breaker: if too many failures, stop processing
+                total_processed = success_count + error_count + timeout_count
+                if total_processed >= 5 and error_count / total_processed > 0.8:  # >80% failure rate
+                    logger.error(f"🚨 Circuit breaker activated: {error_count}/{total_processed} failures")
+                    break
 
         logger.info(f"Successfully processed {processed_count} out of {len(cell_voltage_files)} cell voltage files")
 
@@ -1653,14 +1776,180 @@ async def get_real_sat_voltage(
 
         logger.info(f"Real SAT voltage calculation complete: {len(sat_voltage_data)} cells, {len(all_timestamps)} days")
 
-        # Cache the result
+        # Cache the result in memory
         _real_sat_cache[cache_key] = (result, datetime.now().timestamp())
+
+        # SAVE TO FILE for persistent instant loading (both demo and complete)
+        try:
+            cache_data = {
+                'data': result,
+                'cached_at': datetime.now().timestamp(),
+                'mode': 'demo' if demo_mode else 'complete',
+                'cells_processed': len(sat_voltage_data),
+                'days_analyzed': len(all_timestamps)
+            }
+
+            # Ensure cache directory exists
+            demo_cache_dir = Path("backend/.demo_cache")
+            demo_cache_dir.mkdir(exist_ok=True)
+
+            # Save to appropriate cache file
+            cache_filename = f"{bess_system}_{'demo' if demo_mode else 'complete'}_{time_resolution}.json"
+            cache_file = demo_cache_dir / cache_filename
+
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f, default=str)  # default=str handles datetime serialization
+
+            logger.info(f"Saved {'demo' if demo_mode else 'complete'} cache to {cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save cache file: {e}")
 
         return result
 
     except Exception as e:
         logger.error(f"Real SAT voltage calculation failed: {e}")
         raise HTTPException(500, f"Real SAT voltage calculation failed: {e}")
+
+
+@app.get("/cell/system/{bess_system}/raw-voltage-plot")
+async def get_raw_voltage_plot_data(
+    bess_system: str,
+    cell_id: str = Query(..., description="Cell ID (e.g., pack_1_cell_1)"),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    sample_rate: int = Query(100, description="Data sampling rate (every Nth point)")
+):
+    """Get raw voltage data optimized for fast Plotly visualization
+
+    Returns sampled voltage data points for plotting voltage trends over time
+    Optimized for speed with aggressive sampling and caching
+    """
+    # Check cache first (cache for 10 minutes for plotting data)
+    cache_key = f"{bess_system}_{cell_id}_{start}_{end}_{sample_rate}"
+    if cache_key in _raw_voltage_cache:
+        cached_result, cached_time = _raw_voltage_cache[cache_key]
+        if datetime.now().timestamp() - cached_time < 600:  # 10 minute cache
+            logger.info(f"Returning cached raw voltage plot data for {cell_id}")
+            return cached_result
+
+    try:
+        start_dt = _parse_client_dt(start) if start else None
+        end_dt = _parse_client_dt(end) if end else None
+
+        # Find the BESS system folder
+        root_paths = _parse_roots()
+        bess_folder = None
+
+        for root_path in root_paths:
+            potential_path = Path(root_path) / bess_system
+            if potential_path.exists() and potential_path.is_dir():
+                bess_folder = potential_path
+                break
+
+        if not bess_folder:
+            raise HTTPException(404, f"BESS system {bess_system} not found")
+
+        # Parse cell_id to find corresponding CSV file
+        # cell_id format: pack_1_cell_1 -> find bms1_p1_v1.csv
+        try:
+            parts = cell_id.split('_')
+            pack_num = parts[1]  # pack_1 -> 1
+            cell_num = parts[3]  # cell_1 -> 1
+            csv_filename = f"bms1_p{pack_num}_v{cell_num}.csv"
+            cell_file = bess_folder / csv_filename
+        except:
+            raise HTTPException(400, f"Invalid cell_id format: {cell_id}")
+
+        if not cell_file.exists():
+            raise HTTPException(404, f"Cell voltage file not found: {csv_filename}")
+
+        logger.info(f"Loading raw voltage data from {csv_filename} with sampling rate {sample_rate}")
+
+        # Read voltage data with aggressive sampling for speed
+        voltage_data = []
+        chunk_size = 50000  # Smaller chunks for faster processing
+        row_count = 0
+
+        for chunk in pd.read_csv(cell_file, chunksize=chunk_size):
+            if chunk.empty or len(chunk.columns) < 2:
+                continue
+
+            # Fast parsing with aggressive filtering
+            chunk['ts'] = pd.to_datetime(chunk.iloc[:, 0], errors='coerce')
+            chunk['voltage'] = pd.to_numeric(chunk.iloc[:, 1], errors='coerce')
+            chunk = chunk.dropna(subset=['ts', 'voltage'])
+
+            # Apply voltage range filtering (Li-ion range)
+            chunk = chunk[(chunk['voltage'] > 2.8) & (chunk['voltage'] < 4.3)]
+
+            if chunk.empty:
+                continue
+
+            # Apply date filtering
+            if start_dt:
+                chunk = chunk[chunk['ts'] >= start_dt]
+            if end_dt:
+                chunk = chunk[chunk['ts'] <= end_dt]
+
+            if chunk.empty:
+                continue
+
+            # Sort by timestamp
+            chunk = chunk.sort_values('ts')
+
+            # Apply aggressive sampling for plotting speed
+            sampled_chunk = chunk.iloc[::sample_rate, :]
+
+            # Convert to plot data format
+            for _, row in sampled_chunk.iterrows():
+                voltage_data.append({
+                    "timestamp": row['ts'].isoformat(),
+                    "voltage": round(row['voltage'], 4),
+                    "voltage_mv": round(row['voltage'] * 1000, 1)  # Also provide in mV
+                })
+
+            row_count += len(chunk)
+
+            # Limit total data points for performance (max 10K points for plotting)
+            if len(voltage_data) >= 10000:
+                break
+
+        if not voltage_data:
+            raise HTTPException(404, f"No voltage data found for {cell_id}")
+
+        # Calculate voltage statistics
+        voltages = [point["voltage"] for point in voltage_data]
+        voltage_stats = {
+            "min_voltage": round(min(voltages), 4),
+            "max_voltage": round(max(voltages), 4),
+            "avg_voltage": round(sum(voltages) / len(voltages), 4),
+            "voltage_range": round(max(voltages) - min(voltages), 4),
+            "data_points": len(voltage_data),
+            "total_rows_processed": row_count,
+            "sampling_rate": sample_rate
+        }
+
+        result = {
+            "cell_id": cell_id,
+            "system": bess_system,
+            "voltage_data": voltage_data,
+            "statistics": voltage_stats,
+            "data_source": "raw_bms_voltage_data",
+            "time_range": {
+                "start": voltage_data[0]["timestamp"] if voltage_data else None,
+                "end": voltage_data[-1]["timestamp"] if voltage_data else None
+            }
+        }
+
+        # Cache the result
+        _raw_voltage_cache[cache_key] = (result, datetime.now().timestamp())
+
+        logger.info(f"Raw voltage plot data complete: {len(voltage_data)} points from {row_count} total rows")
+        return result
+
+    except Exception as e:
+        logger.error(f"Raw voltage plot data failed: {e}")
+        raise HTTPException(500, f"Raw voltage plot data failed: {e}")
 
 
 # ---------------- Lifecycle ----------------

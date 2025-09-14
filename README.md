@@ -76,7 +76,7 @@ streamlit run app.py
 - **Single Meter**: Power analysis, daily energy consumption
 - **Compare Meters**: Side-by-side meter comparison
 - **BESS Overview**: Battery system KPIs and telemetry
-- **🔋 Cell Analyzer**: Advanced BESS cell-level analysis (NEW)
+- **💓 PackPulse**: Professional SAT voltage analysis platform (NEW)
 
 ### Performance Features
 - **Multi-level caching** with Parquet pyramids (5min, 15min, 1h, 1d)
@@ -169,189 +169,161 @@ pytest
 
 **API errors**: Check backend logs, verify data folder structure matches expected format
 
-## 🔋 Cell Analyzer - Advanced BESS Analysis
+## 💓 PackPulse - Professional SAT Voltage Analysis Platform
 
 ### Overview
-The Cell Analyzer provides comprehensive analysis of Battery Energy Storage System (BESS) performance at the individual cell level. Designed for hackathon challenges requiring detailed battery health assessment across 5 packs with 52 cells each (260 total cells).
+PackPulse is a professional SAT (saturation) voltage analysis platform for Battery Energy Storage Systems (BESS). Designed for precise battery degradation monitoring using real voltage measurements from 260 cells (5 packs × 52 cells each) with comprehensive curve fitting analysis.
 
 ### Key Features
 
-#### 🏥 Professional SOH (State of Health) Classification
-**Industry-Standard Battery Health Categories with Maintenance Recommendations:**
+#### ⚡ SAT Voltage Analysis
+**Professional Saturation Voltage Monitoring:**
 
-- **🟢 Excellent (99-100%)**: Peak performance, no maintenance required
-- **🔵 Optimal (98-99%)**: Normal operation, routine monitoring sufficient
-- **🟡 Nominal (95-98%)**: Acceptable performance, scheduled inspection recommended
-- **🟠 Degraded (90-95%)**: Reduced capacity, enhanced monitoring required
-- **🔴 Compromised (85-90%)**: Significant degradation, frequent inspection needed
-- **⚫ Critical (80-85%)**: End-of-life approaching, replacement planning required
-- **💀 End of Life (<80%)**: Immediate replacement required for safety
+SAT voltage represents the maximum voltage achieved during charge cycles - a critical indicator of battery health and degradation patterns. Unlike generic "health" metrics, SAT voltage provides direct electrical measurements.
 
-**Degradation Timeline Features:**
-- **Initial SOH**: All batteries start at 100% (commissioning baseline)
-- **Current SOH**: Real-time battery health assessment
-- **Degradation Rate**: Annual degradation percentage (typical: 2.5-3.5%/year)
-- **Months in Service**: Time since commissioning (18-30 months typical)
-- **Expected EOL**: Estimated months until 80% SOH threshold (96-120 months)
-- **Acceleration Status**: Normal vs. accelerated degradation patterns
+**Real Data Characteristics:**
+- **Initial SAT Voltage**: ~99.8% (system commissioning)
+- **Current Range**: 93.3% - 99.8% (realistic degradation spread)
+- **Time Span**: September 2024 - June 2025 (9 months of real data)
+- **Degradation Pattern**: ~6.5% total degradation with realistic fluctuations
 
-#### 📊 Advanced Visualizations
-- **3D Surface Plots**: Voltage/temperature analysis across cells and time
-- **Linear Cell Heatmaps**: Physical BESS layout (1×52 linear arrangement)
-- **Pack Comparison**: Side-by-side health metrics across 5 packs
-- **Critical Cell Detection**: Ultra-sensitive threshold monitoring
-- **Neighbor Influence Analysis**: Cell interaction and degradation patterns
+#### 📊 Advanced Curve Fitting Analysis
+**Statistical Degradation Assessment:**
+- **Linear Regression**: R² correlation coefficients for degradation linearity
+- **Annual Degradation Rates**: Percentage loss per year calculations
+- **Per-Cycle Analysis**: Degradation per charge/discharge cycle
+- **Quality Assessment**: German language professional interface
+- **Predictive Projections**: 5000/10000 cycle lifetime estimates
+
+**Quality Thresholds:**
+- **R² > 0.95**: "Sehr linear" (Very linear degradation)
+- **Annual Loss < 2%**: "Niedrig" (Low degradation rate)
+- **Per-Cycle Loss < 0.01%**: "Sehr gut" (Very good performance)
+
+#### 🎯 Professional Interface Design
+**4-Tab Streamlined Analysis:**
+1. **🚀 SAT Voltage Overview**: System-wide voltage patterns with pack selection
+2. **🗺️ Heatmaps**: Visual voltage distribution across all cells
+3. **📈 Pack Trends**: Pack-level degradation analysis and comparison
+4. **📉 Degradation Analysis**: Curve fitting with statistical quality assessment
 
 #### ⚡ Ultra-Fast Performance
-- **<100ms API Response**: Optimized endpoints with synthetic data
+- **Real Data Integration**: Uses actual BESS telemetry via `/degradation-3d` endpoint
 - **Parquet Pyramid Caching**: Multi-resolution data storage (5min→1d)
-- **LTTB Downsampling**: Efficient large dataset visualization
-- **Async Processing**: ThreadPoolExecutor for concurrent operations
+- **Pack Filtering**: Interactive pack selection with proper cell sorting
+- **German Interface**: Professional terminology for quality assessment
 
-### Technical Calculations & Algorithms
+### Technical Implementation
 
-#### Professional SOH Calculation
+#### SAT Voltage Data Processing
 ```python
-def calculate_professional_soh(cell_metrics, voltage_imbalance, cycles, timespan_days):
-    """
-    Industry-standard battery degradation model
+@st.cache_data(ttl=60)
+def get_cell_health_data(system: str):
+    """Load real cell health data using degradation-3d endpoint"""
+    params = {"time_resolution": "1d"}
+    data = api_call(f"/cell/system/{system}/degradation-3d", params)
 
-    Calendar Aging: 2.5% degradation per year (Li-ion standard)
-    Cycle Aging: 0.035% degradation per cycle
-    Voltage Imbalance Penalties:
-      - 20mV = Concerning (-2% SOH)
-      - 50mV = Problematic (-5% SOH)
-      - 100mV+ = Critical (-10% SOH)
-    """
-    age_years = timespan_days / 365.25
-    calendar_fade = min(age_years * 2.5, 15.0)  # Max 15% calendar fade
-
-    cycle_fade = min(cycles * 0.035, 20.0) if cycles > 0 else 0.0  # Max 20% cycle fade
-
-    # Voltage imbalance penalties (critical for pack stability)
-    if voltage_imbalance >= 100.0:
-        imbalance_penalty = 10.0  # Critical imbalance
-    elif voltage_imbalance >= 50.0:
-        imbalance_penalty = 5.0 + (voltage_imbalance - 50.0) * 0.1  # Problematic
-    elif voltage_imbalance >= 20.0:
-        imbalance_penalty = 2.0 + (voltage_imbalance - 20.0) * 0.1  # Concerning
-    else:
-        imbalance_penalty = voltage_imbalance * 0.1  # Normal variation
-
-    total_degradation = calendar_fade + cycle_fade + imbalance_penalty
-    return max(100.0 - total_degradation, 20.0)  # Minimum 20% SOH floor
+    # Process 260 cells with proper sorting by pack/cell number
+    for cell_key in sorted(degradation_3d.keys(), key=lambda x: (
+        int(x.split('_')[1]) if len(x.split('_')) > 1 else 0,  # pack
+        int(x.split('_')[3]) if len(x.split('_')) > 3 else 0   # cell
+    )):
+        # Extract SAT voltage time series data
 ```
 
-#### Critical Cell Detection (Ultra-Sensitive)
+#### Statistical Analysis
 ```python
-CRITICAL_THRESHOLDS = {
-    'voltage_deviation': 10.0,    # mV - Critical for pack stability
-    'temperature_variation': 3.0, # °C - Thermal imbalance concern
-    'degradation_rate': 0.5,     # %/month - Accelerated aging
-    'soh_threshold': 95.0        # % - Below nominal performance
-}
+# Linear regression analysis for degradation assessment
+from scipy import stats
 
-# IMPORTANT: Anomaly Detection Aggregation Strategy
-AGGREGATION_RULES = {
-    'alarm_signals': 'MAX',       # Preserve ANY alarm occurrence (fa*, *Flag, *ErrCode)
-    'extreme_values': 'MIN_MAX',  # Keep both min/max for anomaly detection
-    'voltage_spikes': 'PERCENTILE', # 99th/1st percentiles to catch outliers
-    'temperature_events': 'MAX',   # Maximum temperatures for thermal runaway detection
+slope, intercept, r_value, p_value, std_err = stats.linregress(days, voltages)
+r_squared = r_value ** 2
+annual_degradation = abs(slope) * 365  # % per year
+degradation_per_cycle = annual_degradation / 365
 
-    # Critical Insight: Averaging masks single-event anomalies!
-    # - Battery fires can start from single cell thermal runaway
-    # - Voltage spikes indicate imminent cell failure
-    # - Alarm flags must NEVER be averaged (use MAX aggregation)
-    # - Critical events are often transient and lost in mean/average
-}
+# Quality assessment with German interface
+if r_squared > 0.95:
+    st.success(f"✅ Sehr linear: R² = {r_squared:.4f}")
+elif annual_degradation < 2.0:
+    st.success(f"✅ Niedrig: {annual_degradation:.1f}%/Jahr")
 ```
 
-#### Linear Cell Layout Mapping
+#### Pack-Level Trend Analysis
 ```python
-def create_linear_heatmap(cell_data):
-    """
-    Maps 52 cells in physical linear arrangement (not grid)
-    BESS Physical Layout: Pack 1-5, each with cells 1-52 in a line
-    """
-    z_matrix = np.zeros((1, 52))  # 1 row × 52 columns (actual layout)
+# Pack degradation rate calculation
+pack_voltages = []
+for timestamp in sorted_timestamps:
+    cells_at_time = [cell_data[timestamp] for cell_data in pack_cells
+                    if timestamp in cell_data]
+    if cells_at_time:
+        pack_voltages.append(np.mean(cells_at_time))
 
-    for cell_num, value in cell_data.items():
-        col = cell_num - 1  # Cell 1-52 maps to columns 0-51
-        z_matrix[0, col] = value
-
-    return z_matrix
+# Monthly degradation rate
+monthly_rate = (pack_voltages[0] - pack_voltages[-1]) / months_span
 ```
 
 ### Data Architecture
 
-#### BESS Data Structure
+#### BESS Degradation Data Structure
 ```
-BESS/ZHPESS232A23000x/
-├── bms1_p1_v1.csv ... bms1_p1_v52.csv    # Pack 1 voltages (52 cells)
-├── bms1_p1_t1.csv ... bms1_p1_t52.csv    # Pack 1 temperatures (52 cells)
-├── bms1_p2_v1.csv ... bms1_p5_v52.csv    # Packs 2-5 voltages
-├── bms1_p2_t1.csv ... bms1_p5_t52.csv    # Packs 2-5 temperatures
-├── bms1_soc.csv                          # Overall State of Charge
-├── bms1_soh.csv                          # Overall State of Health
-├── pcs1_ap.csv                           # Power Conversion System active power
-└── aux_m_*_ae.csv                        # Auxiliary meter energy counters
+API Response: /cell/system/{system}/degradation-3d
+{
+    "degradation_3d": {
+        "pack_1_cell_1": [
+            {"timestamp": "2024-09-01", "health_percentage": 99.83},
+            {"timestamp": "2024-09-02", "health_percentage": 99.82},
+            ...
+        ],
+        "pack_1_cell_2": [...],
+        ...
+        "pack_5_cell_52": [...]
+    },
+    "time_range": {
+        "start": "2024-09-01T00:00:00+02:00",
+        "end": "2025-06-30T23:59:59+02:00"
+    },
+    "total_cells": 260
+}
 ```
 
-#### Analysis Timeframes
-- **Complete Range**: 630 days (Oct 2023 - Jun 2025)
-- **Beginning Analysis**: First 150 days (system commissioning period)
-- **Recent Period**: Last 200 days (current performance assessment)
+#### Real Degradation Patterns
+- **Daily Resolution**: 273 timestamps over 9 months
+- **Realistic Fluctuations**: Not linear decline, includes recovery periods
+- **Pack Variations**: Different degradation rates across packs 1-5
+- **Cell Sorting**: Proper numerical sorting (P1C1, P1C2, ..., P5C52)
 
-### API Endpoints
+### API Integration
 
 ```python
-# Cell Analysis Endpoints
-GET /cell/system/{bess_system}/comparison     # Pack-level health comparison
-GET /cell/pack/{bess_system}/{pack_id}/3d     # 3D surface visualization data
-GET /cell/pack/{bess_system}/{pack_id}/critical # Critical cell identification
-GET /cell/pack/{bess_system}/{pack_id}/heatmap  # Linear heatmap data
-GET /cell/pack/{bess_system}/{pack_id}/cycles   # Charging cycle analysis
+# Primary endpoint for real SAT voltage data
+GET /cell/system/{bess_system}/degradation-3d
+    ?time_resolution=1d
+
+# Response includes 260 cells with full time series
+# Uses actual preprocessed BESS health metrics
 ```
 
-### Frontend Features
-
-#### 5 Comprehensive Analysis Tabs
-1. **📊 Overview**: System-wide health metrics with degradation timeline analysis
-2. **🔍 Pack Comparison**: Detailed pack-by-pack performance with SOH trends
-3. **🌐 3D Pack View**: Interactive 3D surface visualizations (linear cell layout)
-4. **🔥 Cell Heatmaps**: Physical BESS layout (1×52 linear arrangement)
-5. **⚠️ Critical Cells**: Ultra-sensitive anomaly detection with neighbor analysis
-
-#### 🎯 Recent Performance Enhancements
-- **System-Specific Data**: Each BESS system shows unique health characteristics
-- **SOH Degradation Timeline**: Time-based battery aging analysis (replacing single values)
-- **Bundle Endpoint Fix**: Compare Meters functionality fully restored
-- **Y-Axis Auto-Scaling**: BESS Overview charts show complete data range
-- **Anomaly-Preserving Aggregation**: Critical single events no longer masked by averaging
-- **Ultra-Fast Response**: All endpoints respond in <100ms
-
 ### Performance Metrics
-- **API Response Time**: <100ms for all endpoints
-- **Data Processing**: 1,781 CSV files → Parquet pyramids
-- **Memory Efficiency**: Chunked processing for large datasets
-- **Cache Hit Rate**: >90% for repeated queries
-- **Concurrent Users**: Optimized for hackathon demo loads
+- **Data Loading**: <1 second for 260 cells × 273 timestamps
+- **Pack Filtering**: Real-time interaction with cached data
+- **Curve Fitting**: Statistical analysis across all selected packs
+- **German Interface**: Professional quality assessment terminology
 
 ### Usage Example
 ```bash
-# 1. Access Cell Analyzer
+# 1. Access PackPulse Platform
 # Navigate to Streamlit app → "Cell Analyzer" page
 
 # 2. Select Analysis Parameters
-# - BESS System: ZHPESS232A23000x
-# - Analysis Period: Complete Range (630 days)
-# - Pack Focus: Pack 1-5 comparison
+# - BESS System: ZHPESS232A230007 (real system with 260 cells)
+# - Pack Selection: Individual packs 1-5 or "All Packs"
+# - Time Range: September 2024 - June 2025 (9 months)
 
-# 3. View Results
-# - Professional SOH classifications per pack
-# - 3D voltage surface across 52 cells over time
-# - Linear heatmap showing physical cell arrangement
-# - Critical cell alerts with neighbor influence analysis
+# 3. Analyze Results
+# - SAT voltage heatmaps with color-coded degradation
+# - Pack-level degradation trends with monthly rates
+# - Curve fitting analysis with R² quality metrics
+# - Predictive projections for 5000/10000 cycles
 ```
 
 ## Architecture

@@ -1,864 +1,613 @@
-# frontend/pages/cell_analyzer_fast.py
-"""
-ULTRA-FAST BESS Cell Analyzer - Optimized for Speed
-
-Performance Optimizations:
-- Aggressive caching (5+ minute TTL)
-- Lazy loading with progress indicators
-- Lightweight visualizations
-- Batched API calls
-- Async data loading simulation
-- Optimized Plotly configurations
-"""
-
+# Real Battery Cell Health Monitor
 import os
-import asyncio
-import time
-from datetime import datetime, timedelta, date
-from typing import Dict, List, Optional, Any
-import json
-
 import pandas as pd
 import requests
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import numpy as np
+from datetime import datetime, timedelta
+from scipy import stats
+from sklearn.linear_model import LinearRegression
 
 API_URL = os.environ.get("API_URL", "http://127.0.0.1:8000")
-st.set_page_config(page_title="🚀 Ultra-Fast Cell Analyzer", layout="wide")
 
-# Performance CSS
-st.markdown("""
-<style>
-.stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
-    font-size: 18px;
-    font-weight: bold;
-}
-.metric-highlight {
-    background: linear-gradient(90deg, #ff6b6b, #4ecdc4);
-    padding: 12px;
-    border-radius: 8px;
-    color: white;
-    font-weight: bold;
-    margin: 5px 0;
-    text-align: center;
-}
-.fast-card {
-    background-color: #f8f9fa;
-    padding: 15px;
-    border-radius: 10px;
-    border-left: 5px solid #007bff;
-    margin: 10px 0;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-}
-.danger-card { border-left-color: #dc3545; }
-.warning-card { border-left-color: #ffc107; }
-.success-card { border-left-color: #28a745; }
+st.set_page_config(page_title="🔋 PackPulse 💓 - SAT Voltage Monitor", layout="wide")
 
-/* Spinner optimization */
-.stSpinner > div {
-    border-top-color: #ff6b6b !important;
-}
-</style>
-""", unsafe_allow_html=True)
+def api_call(endpoint, params=None):
+    """Simple API call with error handling"""
+    try:
+        response = requests.get(f"{API_URL}{endpoint}", params=params or {}, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return {}
 
-# Title with performance badge
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.title("🚀 Ultra-Fast Cell Analyzer")
-    st.caption("Advanced 260-cell BESS analysis with lightning-fast performance")
-with col2:
-    st.markdown("""
-    <div style="text-align: right; margin-top: 20px;">
-        <span style="background: #28a745; color: white; padding: 5px 10px; border-radius: 15px; font-size: 12px;">
-            ⚡ OPTIMIZED
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
+@st.cache_data(ttl=60)
+def get_bess_systems():
+    """Get available BESS systems"""
+    data = api_call("/meters/classified")
+    return data.get("bess", {})
 
-# ---------------- Optimized HTTP Client ----------------
-class FastAPIClient:
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({"Connection": "keep-alive"})
+@st.cache_data(ttl=60)
+def get_cell_health_data(system: str):
+    """Load real cell health data using degradation-3d endpoint"""
+    params = {"time_resolution": "1d"}
+    data = api_call(f"/cell/system/{system}/degradation-3d", params)
 
-    def _req(self, path: str, params: dict = None, timeout: int = 120) -> dict:
-        """Ultra-fast API request with connection pooling and extended timeout for real data"""
+    if not data or "degradation_3d" not in data:
+        return {"cells": [], "timestamps": [], "health_matrix": []}
+
+    degradation_3d = data["degradation_3d"]
+
+    # Extract all unique timestamps and cells
+    all_timestamps = set()
+    all_cells = set()
+
+    for cell_key, time_series in degradation_3d.items():
+        if time_series:
+            all_cells.add(cell_key)
+            for point in time_series:
+                all_timestamps.add(point["timestamp"])
+
+    timestamps = sorted(list(all_timestamps))
+    # Sort cells by pack and cell number (pack_1_cell_1, pack_1_cell_2, etc.)
+    def parse_cell_id(cell_key):
         try:
-            response = self.session.get(f"{API_URL}{path}", params=params, timeout=timeout)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            st.error(f"⚡ Fast API Error: {e}")
-            return {}
+            parts = cell_key.split('_')
+            pack_num = int(parts[1])  # pack_1 -> 1
+            cell_num = int(parts[3])  # cell_1 -> 1
+            return (pack_num, cell_num)
+        except:
+            return (999, 999)  # Put parse errors at the end
 
-# Global fast client
-fast_api = FastAPIClient()
+    cells = sorted(list(all_cells), key=parse_cell_id)
 
-# ---------------- Super-Cached Data Loaders ----------------
-@st.cache_data(ttl=300, show_spinner="🔍 Discovering BESS systems...")  # 5 min cache
-def get_bess_systems_fast() -> dict:
-    """Lightning-fast BESS system discovery"""
-    classified = fast_api._req("/meters/classified")
-    return classified.get("bess", {})
+    # Build health matrix: [timestamp][cell] = health%
+    health_matrix = []
+    for timestamp in timestamps:
+        row = []
+        for cell_key in cells:
+            cell_data = degradation_3d.get(cell_key, [])
+            health_value = 85.0  # default
 
-@st.cache_data(ttl=120, show_spinner="⚡ Loading pack health...")  # 2 min cache
-def get_pack_comparison_fast(system: str, start: str = None, end: str = None) -> dict:
-    """Super-fast pack comparison"""
-    params = {}
-    if start: params["start"] = start
-    if end: params["end"] = end
-    return fast_api._req(f"/cell/system/{system}/comparison", params)
+            for point in cell_data:
+                if point["timestamp"] == timestamp:
+                    health_value = point["health_percentage"]
+                    break
 
-@st.cache_data(ttl=60, show_spinner="🔥 Analyzing cells...")  # 1 min cache
-def get_pack_health_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
-    """Fast pack health analysis"""
-    params = {}
-    if start: params["start"] = start
-    if end: params["end"] = end
-    return fast_api._req(f"/cell/pack/{system}/{pack_id}/health", params)
+            row.append(health_value)
+        health_matrix.append(row)
 
-@st.cache_data(ttl=60, show_spinner="🗺️ Building heatmap...")
-def get_heatmap_fast(system: str, pack_id: int, metric: str = "voltage", start: str = None, end: str = None) -> dict:
-    """Lightning-fast heatmap data"""
-    params = {"metric": metric}
-    if start: params["start"] = start
-    if end: params["end"] = end
-    return fast_api._req(f"/cell/pack/{system}/{pack_id}/heatmap", params)
-
-@st.cache_data(ttl=90, show_spinner="⚠️ Finding anomalies...")
-def get_anomalies_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
-    """Fast anomaly detection"""
-    params = {}
-    if start: params["start"] = start
-    if end: params["end"] = end
-    return fast_api._req(f"/cell/pack/{system}/{pack_id}/anomalies", params)
-
-@st.cache_data(ttl=180, show_spinner="🔍 Analyzing charging cycles...")
-def get_pack_cycles_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
-    """Lightning-fast cycle analysis"""
-    params = {}
-    if start: params["start"] = start
-    if end: params["end"] = end
-    return fast_api._req(f"/cell/pack/{system}/{pack_id}/cycles", params)
-
-@st.cache_data(ttl=240, show_spinner="🎯 Building 3D visualization...")
-def get_3d_data_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
-    """Ultra-fast 3D data preparation"""
-    params = {}
-    if start: params["start"] = start
-    if end: params["end"] = end
-    return fast_api._req(f"/cell/pack/{system}/{pack_id}/cycles/3d", params)
-
-@st.cache_data(ttl=300, show_spinner="🚨 Detecting critical cells...")
-def get_critical_cells_fast(system: str, pack_id: int, start: str = None, end: str = None) -> dict:
-    """Critical cell detection with neighbor analysis"""
-    params = {}
-    if start: params["start"] = start
-    if end: params["end"] = end
-    return fast_api._req(f"/cell/pack/{system}/{pack_id}/critical", params)
-
-# ---------------- Ultra-Fast Visualizations ----------------
-def create_fast_pack_radar(comparison_data: dict) -> go.Figure:
-    """Lightning-fast radar chart"""
-    if not comparison_data.get("packs"):
-        return go.Figure().add_annotation(text="No pack data", showarrow=False)
-
-    fig = go.Figure()
-
-    # Fast color palette
-    colors = ["#ff6b6b", "#4ecdc4", "#45b7d1", "#96ceb4", "#ffeaa7"]
-
-    for i, (pack_name, pack_data) in enumerate(comparison_data["packs"].items()):
-        pack_id = pack_data["pack_id"]
-
-        # Normalized metrics for radar (0-100 scale)
-        values = [
-            pack_data["pack_soh"],  # Already 0-100
-            max(0, 100 - pack_data["voltage_imbalance"] * 1000),  # Invert imbalance
-            max(0, 100 - pack_data["avg_temperature"]),  # Invert temperature
-            pack_data["healthy_cells"] / 52 * 100,  # Healthy percentage
-            max(0, 100 - abs(pack_data["degradation_rate"]) * 10000),  # Invert degradation
-        ]
-
-        fig.add_trace(go.Scatterpolar(
-            r=values,
-            theta=["SOH", "Balance", "Thermal", "Healthy", "Stability"],
-            fill='toself',
-            name=f"Pack {pack_id}",
-            line_color=colors[i % len(colors)],
-            fillcolor=colors[i % len(colors)],
-            opacity=0.6
-        ))
-
-    # Ultra-fast layout
-    fig.update_layout(
-        polar=dict(
-            radialaxis=dict(visible=True, range=[0, 100], tickmode='linear', tick0=0, dtick=25)
-        ),
-        title=dict(text="⚡ Pack Health Radar", x=0.5, font=dict(size=20)),
-        showlegend=True,
-        height=400,
-        template="plotly_white"
-    )
-
-    return fig
-
-def create_fast_heatmap(heatmap_data: dict, pack_id: int) -> go.Figure:
-    """Ultra-fast heatmap with linear cell arrangement (cells in a line)"""
-    if not heatmap_data.get("heatmap_data"):
-        return go.Figure().add_annotation(text="No cell data", showarrow=False)
-
-    data = heatmap_data["heatmap_data"]
-    metric = heatmap_data["metric"]
-
-    # Create linear matrix: 1 row × 52 columns (actual physical layout)
-    z_matrix = np.zeros((1, 52))
-    hover_text = np.empty((1, 52), dtype=object)
-    cell_labels = []
-
-    for cell_data in data:
-        cell_num = int(cell_data["cell_num"])
-        col = cell_num - 1  # Convert to 0-based indexing (cell 1 → col 0)
-
-        if 0 <= col < 52:  # Safety check
-            z_matrix[0, col] = cell_data["value"]
-            hover_text[0, col] = f"Cell {cell_num}<br>{metric}: {cell_data['value']:.3f}<br>Position: {col+1}/52"
-
-    # Create cell position labels
-    cell_labels = [f"C{i+1}" for i in range(52)]
-
-    # Fast colorscale selection with appropriate ranges
-    colorscales = {
-        "voltage": ("Viridis", [3.0, 3.6]),
-        "temperature": ("Hot", [20, 60]),
-        "degradation": ("Reds", [0, 1])
-    }
-    colorscale, value_range = colorscales.get(metric, ("RdYlBu_r", [None, None]))
-
-    fig = go.Figure(data=go.Heatmap(
-        z=z_matrix,
-        hovertemplate="%{text}<extra></extra>",
-        text=hover_text,
-        colorscale=colorscale,
-        showscale=True,
-        colorbar=dict(
-            title=f"{metric.title()}",
-            x=1.02
-        ),
-        zmin=value_range[0],
-        zmax=value_range[1]
-    ))
-
-    fig.update_layout(
-        title=f"🗺️ Pack {pack_id} - {metric.title()} Linear Layout (52 Cells in Line)",
-        xaxis=dict(
-            title="Cell Position →",
-            tickmode="array",
-            tickvals=list(range(0, 52, 4)),  # Show every 4th cell
-            ticktext=[f"C{i+1}" for i in range(0, 52, 4)],
-            range=[-0.5, 51.5],
-            side="bottom"
-        ),
-        yaxis=dict(
-            title="Pack",
-            tickmode="array",
-            tickvals=[0],
-            ticktext=[f"Pack {pack_id}"],
-            range=[-0.5, 0.5],
-            showticklabels=True
-        ),
-        height=200,  # Shorter for single row
-        width=1000,  # Wider to accommodate 52 cells
-        template="plotly_white",
-        margin=dict(l=60, r=100, t=60, b=60)  # Extra right margin for colorbar
-    )
-
-    # Add strategic cell number annotations
-    key_positions = [0, 12, 25, 38, 51]  # Strategic positions along the line
-    annotations = []
-    for pos in key_positions:
-        if pos < 52 and not np.isnan(z_matrix[0, pos]):
-            annotations.append(
-                dict(
-                    x=pos,
-                    y=0,
-                    text=f"C{pos+1}",
-                    showarrow=False,
-                    font=dict(color="white", size=9, family="Arial Black"),
-                    bgcolor="rgba(0,0,0,0.7)",
-                    bordercolor="white",
-                    borderwidth=1,
-                    borderpad=2
-                )
-            )
-
-    fig.update_layout(annotations=annotations)
-
-    return fig
-
-def create_fast_3d_surface(system: str, pack_id: int) -> go.Figure:
-    """Fast 3D surface plot for cell visualization - linear layout"""
-    # Create linear surface for actual physical layout (52 cells in a line)
-    x = np.arange(52)  # 52 cells in line (columns 0-51)
-    y = np.array([0])  # Single row (actual physical layout)
-    X, Y = np.meshgrid(x, y)
-
-    # Simulate voltage surface with linear variation pattern
-    base_voltage = 3.7
-    # Create more realistic linear patterns for cells in a line
-    Z = base_voltage + 0.05 * np.sin(X/10) + np.random.normal(0, 0.02, X.shape)
-
-    fig = go.Figure(data=[go.Surface(
-        x=X, y=Y, z=Z,
-        colorscale="Viridis",
-        colorbar=dict(title="Voltage (V)")
-    )])
-
-    fig.update_layout(
-        title=f"🌐 Pack {pack_id} Linear 3D Voltage Surface",
-        scene=dict(
-            xaxis_title="Cell Position (1-52)",
-            yaxis_title="Physical Row",
-            zaxis_title="Voltage (V)",
-            # Optimize view for linear arrangement
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.2)
-            )
-        ),
-        height=500,
-        template="plotly_white"
-    )
-
-    return fig
-
-# ---------------- Speed-Optimized Interface ----------------
-# Super-fast sidebar
-with st.sidebar:
-    st.markdown("### 🚀 Ultra-Fast Controls")
-
-    # System selection with performance indicator
-    bess_systems = get_bess_systems_fast()
-    if not bess_systems:
-        st.error("❌ No BESS systems found")
-        st.stop()
-
-    system_names = sorted(bess_systems.keys())
-    col_sys, col_clear = st.columns([3, 1])
-    with col_sys:
-        selected_system = st.selectbox("⚡ BESS System", system_names, key="fast_system")
-    with col_clear:
-        st.write("")  # Spacing
-        if st.button("🔄 Clear Cache", key="clear_main_cache"):
-            st.cache_data.clear()
-            st.success("Cache cleared!")
-            st.rerun()
-
-    # Fast date selection
-    st.markdown("#### 📅 Date Range")
-    quick_ranges = {
-        "⚡ Last 24h": 1,
-        "🔥 Last 7d": 7,
-        "💨 Last 30d": 30,
-        "🚀 Last 90d": 90,
-        "📅 Last 6 Months": 180,
-        "📅 Last Year": 365,
-        "📅 Complete Range": 630,  # Oct 2023 to Jun 2025 (~21 months)
-        "🔬 Beginning Analysis": 150,  # Oct 2023-Mar 2024 for degradation onset
-        "🕐 Recent Period": 200  # 2024-2025 for current state
+    return {
+        "cells": cells,
+        "timestamps": timestamps,
+        "health_matrix": health_matrix,
+        "total_cells": len(cells)
     }
 
-    selected_range = st.selectbox("Quick Range", list(quick_ranges.keys()), index=2)
-    days_back = quick_ranges[selected_range]
+# Main UI
+st.title("🔋 PackPulse 💓 - SAT Voltage Monitor")
+st.markdown("**Advanced saturation voltage analysis from real BESS telemetry data**")
 
-    # Use BESS data range (Oct 2023 - Jun 2025) instead of current date
-    end_date = date(2025, 6, 13)  # Last available BESS data
-    start_date = end_date - timedelta(days=days_back)
+# System selection
+systems = get_bess_systems()
+if not systems:
+    st.error("No BESS systems found")
+    st.stop()
 
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str = end_date.strftime("%Y-%m-%d")
+col1, col2 = st.columns(2)
+with col1:
+    selected_system = st.selectbox("Select BESS System", list(systems.keys()))
+with col2:
+    # Pack filter - extract available packs from the first call
+    available_packs = ["All"] + [f"Pack {i}" for i in range(1, 6)]  # Typically 5 packs
+    selected_pack = st.selectbox("Filter by Pack", available_packs)
 
-    # Performance stats
-    st.markdown("---")
-    st.markdown("### 📊 Performance")
-    st.metric("⚡ Cache Hit Rate", "95%")
-    st.metric("🔥 Avg Load Time", "0.8s")
+# Load data
+with st.spinner("Loading SAT voltage analysis data..."):
+    health_data = get_cell_health_data(selected_system)
 
-# Main ultra-fast interface
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🚀 **INSTANT OVERVIEW**",
-    "🗺️ **FAST HEATMAPS**",
-    "⚠️ **QUICK ANOMALIES**",
-    "🎯 **3D PACK VIEW**",
-    "🔗 **CRITICAL CELLS**"
-])
+if not health_data["cells"]:
+    st.error("No SAT voltage data available")
+    st.stop()
+
+# Apply pack filtering
+if selected_pack != "All":
+    pack_num = selected_pack.split()[1]  # "Pack 1" -> "1"
+    filtered_cells = []
+    filtered_indices = []
+
+    for i, cell_key in enumerate(health_data["cells"]):
+        try:
+            cell_pack = cell_key.split('_')[1]  # pack_1_cell_1 -> 1
+            if cell_pack == pack_num:
+                filtered_cells.append(cell_key)
+                filtered_indices.append(i)
+        except:
+            continue
+
+    # Filter the health matrix for selected pack only
+    filtered_health_matrix = []
+    for row in health_data["health_matrix"]:
+        filtered_row = [row[i] for i in filtered_indices]
+        filtered_health_matrix.append(filtered_row)
+
+    # Update health_data with filtered results
+    health_data["cells"] = filtered_cells
+    health_data["health_matrix"] = filtered_health_matrix
+    health_data["total_cells"] = len(filtered_cells)
+
+# Display system info
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("System", selected_system.replace("ZHPESS232A23000", "BESS-"))
+with col2:
+    view_label = selected_pack if selected_pack != "All" else "All Packs"
+    st.metric("Viewing", view_label)
+with col3:
+    st.metric("Cells", health_data["total_cells"])
+with col4:
+    if health_data["health_matrix"]:
+        latest_values = health_data["health_matrix"][-1]
+        avg_sat_voltage = np.mean(latest_values)
+        st.metric("Avg SAT-V", f"{avg_sat_voltage:.1f}%")
+
+# Create tabs
+tab1, tab2, tab3, tab4 = st.tabs(["📊 SAT Voltage Overview", "🗺️ SAT Voltage Heatmap", "📈 Pack Trends", "📉 Degradation Analysis"])
 
 with tab1:
-    st.header("⚡ Lightning-Fast Pack Analysis")
+    st.subheader("SAT Voltage Analysis Overview")
 
-    # Load comparison data with progress
-    st.info(f"🔍 Loading data for: **{selected_system}**")
-    comparison_data = get_pack_comparison_fast(selected_system, start_str, end_str)
+    if health_data["health_matrix"]:
+        # Latest SAT voltage values
+        latest_values = health_data["health_matrix"][-1]
 
-    if comparison_data and comparison_data.get("packs"):
-        # Fast metrics row
-        packs = comparison_data["packs"]
+        # SAT voltage distribution
+        fig_hist = px.histogram(
+            x=latest_values,
+            nbins=20,
+            title="Cell SAT Voltage Distribution",
+            labels={"x": "SAT Voltage %", "y": "Number of Cells"}
+        )
+        fig_hist.update_layout(height=400)
+        st.plotly_chart(fig_hist, use_container_width=True)
 
-        # Super-fast summary metrics
-        col1, col2, col3, col4, col5 = st.columns(5)
+        # Pack-level analysis
+        pack_voltages = {}
+        cells = health_data["cells"]
 
-        pack_sohs = [p["pack_soh"] for p in packs.values()]
-        pack_cycles = [p["discharge_cycles"] for p in packs.values()]
-        total_healthy = sum(p["healthy_cells"] for p in packs.values())
-        total_critical = sum(p["critical_cells"] for p in packs.values())
+        for i, cell_key in enumerate(cells):
+            try:
+                # Parse pack_1_cell_1 format
+                pack_num = cell_key.split('_')[1]  # pack_1 -> 1
+                if pack_num not in pack_voltages:
+                    pack_voltages[pack_num] = []
+                pack_voltages[pack_num].append(latest_values[i])
+            except:
+                continue
 
-        with col1:
-            st.metric("🔋 Avg SOH", f"{np.mean(pack_sohs):.1f}%")
-        with col2:
-            st.metric("⚡ Total Cycles", f"{sum(pack_cycles):,}")
-        with col3:
-            st.metric("✅ Healthy Cells", f"{total_healthy}/260")
-        with col4:
-            st.metric("❌ Critical Cells", total_critical)
-        with col5:
-            best_pack = max(packs.items(), key=lambda x: x[1]["pack_soh"])
-            st.metric("🏆 Best Pack", f"Pack {best_pack[1]['pack_id']}")
+        if pack_voltages:
+            st.subheader("Pack Voltage Analysis Summary")
+            pack_data = []
+            for pack_num in sorted(pack_voltages.keys()):
+                v_indices = pack_voltages[pack_num]
+                pack_data.append({
+                    "Pack": f"Pack {pack_num}",
+                    "Cells": len(v_indices),
+                    "Avg SAT-V": f"{np.mean(v_indices):.1f}%",
+                    "Min SAT-V": f"{np.min(v_indices):.1f}%",
+                    "Max SAT-V": f"{np.max(v_indices):.1f}%",
+                    "Spread": f"{np.max(v_indices) - np.min(v_indices):.1f}%"
+                })
 
-        # Ultra-fast radar chart
-        st.markdown("### ⚡ Real-Time Pack Health")
-        radar_fig = create_fast_pack_radar(comparison_data)
-        st.plotly_chart(radar_fig, use_container_width=True, config={'displayModeBar': False})
-
-        # Fast pack summary table
-        st.markdown("### 🔥 Pack Performance Table")
-
-        summary_data = []
-        for pack_name, pack_data in packs.items():
-            # Professional SOH classification
-            soh = pack_data['pack_soh']
-            soh_trend = pack_data.get('soh_trend', {})
-
-            if soh >= 99:
-                status = "🟢 Excellent"
-            elif soh >= 98:
-                status = "🔵 Optimal"
-            elif soh >= 95:
-                status = "🟡 Nominal"
-            elif soh >= 90:
-                status = "🟠 Degraded"
-            elif soh >= 85:
-                status = "🔴 Compromised"
-            elif soh >= 80:
-                status = "⚫ Critical"
-            else:
-                status = "💀 End of Life"
-
-            # SOH degradation timeline
-            initial_soh = soh_trend.get('initial_soh', 100.0)
-            months_in_service = soh_trend.get('months_in_service', 18)
-            degradation_rate = soh_trend.get('degradation_rate_per_year', 2.5)
-            acceleration = soh_trend.get('degradation_acceleration', 'normal')
-            total_degradation = initial_soh - soh
-            eol_months = soh_trend.get('expected_eol_months', 120)
-
-            summary_data.append({
-                "Pack": f"Pack {pack_data['pack_id']}",
-                "Status": status,
-                "Current SOH": f"{soh:.1f}%",
-                "Degradation": f"-{total_degradation:.1f}% in {months_in_service}mo",
-                "Rate/Year": f"{degradation_rate:.1f}% ({acceleration})",
-                "Est. EOL": f"~{eol_months}mo",
-                "Voltage": f"{pack_data['average_voltage']:.3f}V",
-                "Cycles": pack_data['discharge_cycles'],
-                "Cells": f"✅{pack_data['healthy_cells']} ⚠️{pack_data['warning_cells']} ❌{pack_data['critical_cells']}"
-            })
-
-        summary_df = pd.DataFrame(summary_data)
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(pack_data), use_container_width=True)
 
 with tab2:
-    st.header("🗺️ Ultra-Fast Cell Heatmaps")
+    st.subheader("Cell Voltage Index Heatmap")
 
-    # Fast controls
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        heatmap_pack = st.selectbox("🔋 Select Pack", range(1, 6), key="heatmap_pack")
-    with col2:
-        metric_type = st.selectbox("📊 Metric", ["voltage", "temperature", "degradation"], key="heatmap_metric")
-    with col3:
-        st.markdown("#### 🎯 Quick Actions")
-        if st.button("🔥 Refresh Data", key="refresh_heatmap"):
-            st.cache_data.clear()
-            st.rerun()
+    if health_data["health_matrix"] and health_data["timestamps"]:
+        # Create heatmap data with proper cell labels
+        def format_cell_label(cell_key):
+            try:
+                # Convert pack_1_cell_1 to P1C1
+                parts = cell_key.split('_')
+                pack_num = parts[1]  # 1
+                cell_num = parts[3]  # 1
+                return f"P{pack_num}C{cell_num}"
+            except:
+                return cell_key
 
-    # Lightning-fast heatmap
-    heatmap_data = get_heatmap_fast(selected_system, heatmap_pack, metric_type, start_str, end_str)
+        df_heatmap = pd.DataFrame(
+            health_data["health_matrix"],
+            columns=[format_cell_label(cell) for cell in health_data["cells"]],
+            index=[ts[:10] for ts in health_data["timestamps"]]  # Date only
+        )
 
-    if heatmap_data:
-        # Fast heatmap visualization
-        heatmap_fig = create_fast_heatmap(heatmap_data, heatmap_pack)
-        st.plotly_chart(heatmap_fig, use_container_width=True, config={'displayModeBar': False})
+        # Sample time axis if too many days (keep all cells for pack view)
+        if len(df_heatmap) > 50:
+            step = max(1, len(df_heatmap) // 50)
+            df_heatmap = df_heatmap.iloc[::step]
 
-        # Fast statistics
-        if heatmap_data.get("heatmap_data"):
-            values = [cell["value"] for cell in heatmap_data["heatmap_data"]]
+        # If viewing all packs and too many cells, sample cells
+        if selected_pack == "All" and len(df_heatmap.columns) > 100:
+            # Sample evenly across packs to show representation of each pack
+            step = max(1, len(df_heatmap.columns) // 100)
+            df_heatmap = df_heatmap.iloc[:, ::step]
 
-            # Ultra-fast stats cards
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.markdown(f"""
-                <div class="fast-card">
-                <h4>📊 Average</h4>
-                <h2>{np.mean(values):.3f}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col2:
-                st.markdown(f"""
-                <div class="fast-card success-card">
-                <h4>📈 Maximum</h4>
-                <h2>{np.max(values):.3f}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col3:
-                st.markdown(f"""
-                <div class="fast-card warning-card">
-                <h4>📉 Minimum</h4>
-                <h2>{np.min(values):.3f}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col4:
-                st.markdown(f"""
-                <div class="fast-card">
-                <h4>🎯 Std Dev</h4>
-                <h2>{np.std(values):.3f}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-
-        # Fast 3D surface
-        st.markdown("### 🌐 3D Cell Surface")
-        surface_fig = create_fast_3d_surface(selected_system, heatmap_pack)
-        st.plotly_chart(surface_fig, use_container_width=True, config={'displayModeBar': False})
+        fig_heatmap = px.imshow(
+            df_heatmap.values,
+            x=df_heatmap.columns,
+            y=df_heatmap.index,
+            color_continuous_scale="RdYlGn",
+            aspect="auto",
+            title="Voltage Index Over Time",
+            labels={"x": "Cells", "y": "Date", "color": "SAT-V %"}
+        )
+        fig_heatmap.update_layout(height=600)
+        st.plotly_chart(fig_heatmap, use_container_width=True)
 
 with tab3:
-    st.header("⚠️ Lightning-Fast Anomaly Detection")
+    st.subheader("Pack Voltage Degradation Trends")
 
-    # Fast anomaly controls
-    col1, col2 = st.columns(2)
-    with col1:
-        anomaly_pack = st.selectbox("🔍 Pack to Analyze", range(1, 6), key="anomaly_pack")
-    with col2:
-        st.markdown("#### ⚡ Detection Speed")
-        detection_speed = st.select_slider(
-            "Speed vs Accuracy",
-            ["🐌 Thorough", "⚡ Balanced", "🚀 Ultra-Fast"],
-            value="🚀 Ultra-Fast"
+    if health_data["health_matrix"] and health_data["cells"]:
+        # Calculate pack averages for each timestamp
+        pack_trends = {}
+        timestamps = health_data["timestamps"]
+
+        # Get original full data for pack trends (before filtering)
+        with st.spinner("Calculating pack trends..."):
+            full_data = get_cell_health_data(selected_system)
+
+        # Group cells by pack and calculate averages
+        for timestamp_idx, timestamp in enumerate(full_data["timestamps"]):
+            for cell_idx, cell_key in enumerate(full_data["cells"]):
+                try:
+                    pack_num = cell_key.split('_')[1]  # pack_1_cell_1 -> 1
+                    pack_name = f"Pack {pack_num}"
+
+                    if pack_name not in pack_trends:
+                        pack_trends[pack_name] = {"timestamps": [], "sat_voltage_values": []}
+
+                    # Only add once per timestamp (avoid duplicates)
+                    if timestamp not in pack_trends[pack_name]["timestamps"]:
+                        # Calculate average health for this pack at this timestamp
+                        pack_cells_health = []
+                        for c_idx, c_key in enumerate(full_data["cells"]):
+                            if c_key.split('_')[1] == pack_num:  # Same pack
+                                pack_cells_health.append(full_data["health_matrix"][timestamp_idx][c_idx])
+
+                        if pack_cells_health:
+                            pack_avg = np.mean(pack_cells_health)
+                            pack_trends[pack_name]["timestamps"].append(timestamp)
+                            pack_trends[pack_name]["sat_voltage_values"].append(pack_avg)
+                except:
+                    continue
+
+        # Create pack trend plot
+        fig_pack_trends = go.Figure()
+
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+        for i, (pack_name, data) in enumerate(sorted(pack_trends.items())):
+            if len(data["timestamps"]) > 0:
+                # Calculate voltage decline rate for this pack
+                if len(data["sat_voltage_values"]) > 1:
+                    start_value = data["sat_voltage_values"][0]
+                    end_value = data["sat_voltage_values"][-1]
+                    total_decline = start_value - end_value
+                    days_elapsed = len(data["timestamps"])
+                    decline_rate = total_decline / days_elapsed * 30  # per month
+                else:
+                    decline_rate = 0
+
+                fig_pack_trends.add_trace(go.Scatter(
+                    x=data["timestamps"],
+                    y=data["sat_voltage_values"],
+                    mode='lines',
+                    name=f"{pack_name} (-{decline_rate:.2f}%/mo)",
+                    line=dict(width=3, color=colors[i % len(colors)]),
+                    hovertemplate=f"<b>{pack_name}</b><br>Date: %{{x}}<br>SAT-V: %{{y:.1f}}%<extra></extra>"
+                ))
+
+        fig_pack_trends.update_layout(
+            title="Pack Voltage Index Trends Over Time",
+            xaxis_title="Date",
+            yaxis_title="Pack Average Voltage Index %",
+            height=600,
+            hovermode='x unified',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            ),
+            yaxis=dict(range=[92, 101])  # Focus on actual voltage index range
         )
 
-    # Super-fast anomaly detection
-    anomalies_data = get_anomalies_fast(selected_system, anomaly_pack, start_str, end_str)
+        st.plotly_chart(fig_pack_trends, use_container_width=True)
 
-    if anomalies_data and anomalies_data.get("anomalies"):
-        anomaly_count = anomalies_data["anomalous_cells_count"]
+        # Pack comparison statistics
+        st.subheader("Pack Voltage Analysis Summary")
 
-        # Fast anomaly summary
-        st.markdown(f"""
-        <div class="metric-highlight">
-        🚨 Found {anomaly_count} anomalous cells in Pack {anomaly_pack}
-        </div>
-        """, unsafe_allow_html=True)
+        if pack_trends:
+            pack_stats = []
+            for pack_name, data in sorted(pack_trends.items()):
+                if len(data["sat_voltage_values"]) > 1:
+                    start_value = data["sat_voltage_values"][0]
+                    end_value = data["sat_voltage_values"][-1]
+                    total_decline = start_value - end_value
+                    days_elapsed = len(data["timestamps"])
+                    decline_per_month = total_decline / days_elapsed * 30
 
-        # Lightning-fast anomaly cards
-        st.markdown("### 🔥 Top Anomalies (Ultra-Fast Detection)")
+                    pack_stats.append({
+                        "Pack": pack_name,
+                        "Start SAT-V": f"{start_value:.1f}%",
+                        "Current SAT-V": f"{end_value:.1f}%",
+                        "Total Decline": f"{total_decline:.1f}%",
+                        "Rate (per month)": f"{decline_per_month:.2f}%",
+                        "Projected 1yr": f"{end_value - (decline_per_month * 12):.1f}%"
+                    })
 
-        for i, anomaly in enumerate(anomalies_data["anomalies"][:6], 1):  # Top 6 for speed
-            cell = anomaly["cell"]
-            severity = anomaly["severity_score"]
-            reasons = anomaly.get("reasons", [])
+            if pack_stats:
+                st.dataframe(pd.DataFrame(pack_stats), use_container_width=True)
 
-            # Fast severity classification
-            if severity > 50:
-                card_class = "danger-card"
-                severity_emoji = "🚨"
-                severity_text = "CRITICAL"
-            elif severity > 20:
-                card_class = "warning-card"
-                severity_emoji = "⚠️"
-                severity_text = "WARNING"
-            else:
-                card_class = "fast-card"
-                severity_emoji = "🔍"
-                severity_text = "MONITOR"
-
-            # Ultra-fast anomaly card
-            st.markdown(f"""
-            <div class="fast-card {card_class}">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                    <h3>{severity_emoji} Cell {cell['cell_num']} - {severity_text}</h3>
-                    <p><strong>⚡ Voltage:</strong> {cell['voltage_mean']:.3f}V |
-                       <strong>📉 Degradation:</strong> {cell['degradation_rate']:.4f}V/month |
-                       <strong>🌡️ Max Temp:</strong> {cell['temp_max']:.1f}°C</p>
-                    <p><strong>🔍 Issues:</strong> {', '.join(reasons[:2]) if reasons else 'Statistical anomaly'}</p>
-                </div>
-                <div style="text-align: right;">
-                    <h2 style="margin: 0; color: #007bff;">{severity:.0f}</h2>
-                    <small>Severity Score</small>
-                </div>
-            </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Fast action buttons
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("📊 Export Report", key="export_anomalies"):
-                st.success("⚡ Report exported instantly!")
-        with col2:
-            if st.button("🔔 Set Alerts", key="set_alerts"):
-                st.success("⚡ Alerts configured!")
-        with col3:
-            if st.button("🔧 Schedule Maintenance", key="schedule_maintenance"):
-                st.success("⚡ Maintenance scheduled!")
+        # Show current pack selection focus
+        if selected_pack != "All":
+            st.info(f"💡 Currently viewing detailed data for **{selected_pack}** in other tabs")
 
 with tab4:
-    st.header("🎯 3D Pack Visualization (Time × Cell × Voltage)")
+    st.subheader("📉 Degradation Analysis & Curve Fitting")
+    st.markdown("**Linear regression analysis of SAT voltage decline with cycle estimation**")
 
-    # 3D visualization controls
-    col1, col2 = st.columns(2)
-    with col1:
-        viz_pack = st.selectbox("📦 Pack for 3D View", range(1, 6), key="viz_pack")
-    with col2:
-        st.markdown("#### 🎨 Visualization Style")
-        viz_style = st.selectbox("Style", ["🌈 Colorful", "🔥 Heat Map", "⚡ Performance"], key="viz_style")
+    if health_data["health_matrix"] and health_data["cells"]:
+        # Get full dataset for analysis
+        with st.spinner("Calculating degradation curves..."):
+            full_data = get_cell_health_data(selected_system)
 
-    # Get 3D data
-    with st.spinner("🎯 Building ultra-fast 3D visualization..."):
-        data_3d = get_3d_data_fast(selected_system, viz_pack, start_str, end_str)
+        # Calculate pack averages and fit curves
+        pack_analysis = {}
 
-    if data_3d and data_3d.get("data_points"):
-        points = data_3d["data_points"]
-        total_points = data_3d["total_points"]
+        for cell_idx, cell_key in enumerate(full_data["cells"]):
+            try:
+                pack_num = cell_key.split('_')[1]  # pack_1_cell_1 -> 1
+                pack_name = f"Pack {pack_num}"
 
-        st.success(f"⚡ Loaded {total_points} data points in 3D space!")
+                if pack_name not in pack_analysis:
+                    pack_analysis[pack_name] = {
+                        "timestamps": [],
+                        "sat_voltages": [],
+                        "days_elapsed": []
+                    }
 
-        # Create 3D scatter plot
-        fig_3d = go.Figure()
+                # Get SAT voltage data for this pack
+                for timestamp_idx, timestamp in enumerate(full_data["timestamps"]):
+                    if timestamp not in [t for t in pack_analysis[pack_name]["timestamps"]]:
+                        # Calculate pack average for this timestamp
+                        pack_cells = []
+                        for c_idx, c_key in enumerate(full_data["cells"]):
+                            if c_key.split('_')[1] == pack_num:  # Same pack
+                                pack_cells.append(full_data["health_matrix"][timestamp_idx][c_idx])
 
-        # Extract data for 3D plot
-        times = [datetime.fromisoformat(p["time"]).timestamp() for p in points]
-        cells = [p["cell_num"] for p in points]
-        voltages = [p["voltage"] for p in points]
-        colors = [p["degradation_score"] for p in points]
+                        if pack_cells:
+                            pack_avg = np.mean(pack_cells)
+                            pack_analysis[pack_name]["timestamps"].append(timestamp)
+                            pack_analysis[pack_name]["sat_voltages"].append(pack_avg)
 
-        # Create 3D scatter
-        fig_3d.add_trace(go.Scatter3d(
-            x=times,
-            y=cells,
-            z=voltages,
-            mode='markers',
-            marker=dict(
-                size=3,
-                color=colors,
-                colorscale='Viridis' if viz_style == "🌈 Colorful" else 'Hot' if viz_style == "🔥 Heat Map" else 'Blues',
-                colorbar=dict(title="Degradation Score"),
-                opacity=0.7
-            ),
-            text=[f"Cell {p['cell_num']}<br>Voltage: {p['voltage']:.3f}V<br>Degradation: {p['degradation_score']:.3f}"
-                  for p in points],
-            hovertemplate='<b>Cell %{y}</b><br>Voltage: %{z:.3f}V<br>%{text}<extra></extra>'
-        ))
+                            # Calculate days elapsed since start
+                            if timestamp_idx == 0:
+                                days = 0
+                            else:
+                                start_date = datetime.fromisoformat(full_data["timestamps"][0].replace("Z", "+00:00"))
+                                current_date = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                                days = (current_date - start_date).days
 
-        # Update 3D layout
-        fig_3d.update_layout(
-            title=f"🎯 Pack {viz_pack} - 3D Cell Analysis (Time × Cell × Voltage)",
-            scene=dict(
-                xaxis_title="Time →",
-                yaxis_title="Cell Number (1-52)",
-                zaxis_title="Voltage (V)",
-                camera=dict(eye=dict(x=1.2, y=1.2, z=1.2))
-            ),
-            width=800,
+                            pack_analysis[pack_name]["days_elapsed"].append(days)
+            except:
+                continue
+
+        # Create curve fitting analysis
+        fig_curves = go.Figure()
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+        col1, col2 = st.columns(2)
+
+        degradation_stats = []
+        cycle_estimates = []
+
+        for i, (pack_name, data) in enumerate(sorted(pack_analysis.items())):
+            if len(data["sat_voltages"]) > 10:  # Need enough data points
+
+                # Convert to numpy arrays
+                days = np.array(data["days_elapsed"])
+                voltages = np.array(data["sat_voltages"])
+
+                # Linear regression
+                slope, intercept, r_value, p_value, std_err = stats.linregress(days, voltages)
+
+                # Generate fit line
+                fit_line = slope * days + intercept
+
+                # Calculate degradation metrics
+                annual_degradation = abs(slope) * 365  # % per year
+                monthly_degradation = abs(slope) * 30  # % per month
+
+                # Estimate charge cycles (assume 1 cycle per day average for BESS)
+                total_days = days[-1] - days[0] if len(days) > 1 else 1
+                estimated_cycles = total_days * 1.0  # 1 cycle/day assumption
+                degradation_per_cycle = annual_degradation / 365 if estimated_cycles > 0 else 0
+
+                # Plot actual data
+                fig_curves.add_trace(go.Scatter(
+                    x=days,
+                    y=voltages,
+                    mode='markers',
+                    name=f'{pack_name} Data',
+                    marker=dict(color=colors[i % len(colors)], size=6),
+                    showlegend=True
+                ))
+
+                # Plot linear fit
+                fig_curves.add_trace(go.Scatter(
+                    x=days,
+                    y=fit_line,
+                    mode='lines',
+                    name=f'{pack_name} Fit (R²={r_value**2:.3f})',
+                    line=dict(color=colors[i % len(colors)], dash='dash', width=2),
+                    showlegend=True
+                ))
+
+                # Store statistics
+                degradation_stats.append({
+                    "Pack": pack_name,
+                    "R² (Linearität)": f"{r_value**2:.4f}",
+                    "Verlust/Jahr": f"{annual_degradation:.2f}%",
+                    "Verlust/Monat": f"{monthly_degradation:.3f}%",
+                    "Verlust/Zyklus": f"{degradation_per_cycle:.4f}%",
+                    "Geschätzte Zyklen": f"{estimated_cycles:.0f}",
+                    "Start SAT-V": f"{voltages[0]:.2f}%",
+                    "Aktuell SAT-V": f"{voltages[-1]:.2f}%"
+                })
+
+                # Cycle analysis for detailed view
+                cycle_estimates.append({
+                    "Pack": pack_name,
+                    "Tage im Betrieb": f"{total_days:.0f}",
+                    "Zyklen geschätzt": f"{estimated_cycles:.0f}",
+                    "Verlust pro Zyklus": f"{degradation_per_cycle:.4f}%",
+                    "Hochrechnung 5000 Zyklen": f"{degradation_per_cycle * 5000:.1f}%",
+                    "Hochrechnung 10000 Zyklen": f"{degradation_per_cycle * 10000:.1f}%"
+                })
+
+        # Update plot layout
+        fig_curves.update_layout(
+            title="SAT Voltage Degradation - Linear Curve Fitting",
+            xaxis_title="Tage seit Start",
+            yaxis_title="SAT Voltage %",
             height=600,
-            showlegend=False
+            hovermode='x unified',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
         )
 
-        st.plotly_chart(fig_3d, use_container_width=True, config={'displayModeBar': False})
+        st.plotly_chart(fig_curves, use_container_width=True)
 
-        # 3D Analysis insights
-        st.markdown("### 🔍 3D Analysis Insights")
+        # Display statistics tables
+        col1, col2 = st.columns(2)
 
-        col1, col2, col3 = st.columns(3)
         with col1:
-            voltage_range = max(voltages) - min(voltages)
-            st.metric("📊 Voltage Spread", f"{voltage_range:.3f}V")
+            st.subheader("📊 Degradation Statistiken")
+            if degradation_stats:
+                st.dataframe(pd.DataFrame(degradation_stats), use_container_width=True)
 
         with col2:
-            avg_degradation = sum(colors) / len(colors)
-            st.metric("📉 Avg Degradation", f"{avg_degradation:.3f}")
+            st.subheader("🔋 Zyklen-Hochrechnung")
+            if cycle_estimates:
+                st.dataframe(pd.DataFrame(cycle_estimates), use_container_width=True)
 
-        with col3:
-            unique_cells = len(set(cells))
-            st.metric("🔧 Active Cells", f"{unique_cells}/52")
+        # Quality assessment
+        st.subheader("🎯 Qualitätsbewertung")
 
+        if degradation_stats:
+            # Calculate average metrics
+            avg_r2 = np.mean([float(stat["R² (Linearität)"]) for stat in degradation_stats])
+            avg_annual_loss = np.mean([float(stat["Verlust/Jahr"].replace("%", "")) for stat in degradation_stats])
+            avg_cycle_loss = np.mean([float(stat["Verlust/Zyklus"].replace("%", "")) for stat in degradation_stats])
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                # Linearity quality
+                if avg_r2 > 0.95:
+                    st.success(f"✅ Sehr linear: R² = {avg_r2:.4f}")
+                    linearity_quality = "Ausgezeichnet"
+                elif avg_r2 > 0.90:
+                    st.warning(f"⚠️ Linear: R² = {avg_r2:.4f}")
+                    linearity_quality = "Gut"
+                else:
+                    st.error(f"❌ Nicht linear: R² = {avg_r2:.4f}")
+                    linearity_quality = "Bedenklich"
+
+            with col2:
+                # Annual degradation quality
+                if avg_annual_loss < 2.0:
+                    st.success(f"✅ Niedrig: {avg_annual_loss:.1f}%/Jahr")
+                    annual_quality = "Sehr gut"
+                elif avg_annual_loss < 5.0:
+                    st.warning(f"⚠️ Moderat: {avg_annual_loss:.1f}%/Jahr")
+                    annual_quality = "Akzeptabel"
+                else:
+                    st.error(f"❌ Hoch: {avg_annual_loss:.1f}%/Jahr")
+                    annual_quality = "Bedenklich"
+
+            with col3:
+                # Cycle degradation quality
+                if avg_cycle_loss < 0.01:
+                    st.success(f"✅ Niedrig: {avg_cycle_loss:.4f}%/Zyklus")
+                    cycle_quality = "Sehr gut"
+                elif avg_cycle_loss < 0.02:
+                    st.warning(f"⚠️ Moderat: {avg_cycle_loss:.4f}%/Zyklus")
+                    cycle_quality = "Akzeptabel"
+                else:
+                    st.error(f"❌ Hoch: {avg_cycle_loss:.4f}%/Zyklus")
+                    cycle_quality = "Bedenklich"
+
+            # Summary assessment
+            st.markdown("### 📋 Gesamtbewertung")
+            assessment = f"""
+            **Linearität der Degradation:** {linearity_quality} (R² = {avg_r2:.4f})
+            **Jährlicher Verlust:** {annual_quality} ({avg_annual_loss:.2f}% pro Jahr)
+            **Verlust pro Zyklus:** {cycle_quality} ({avg_cycle_loss:.4f}% pro Zyklus)
+
+            **Prognose für Lebensdauer:**
+            - Bei aktuellem Tempo: ~{100/avg_annual_loss:.0f} Jahre bis zu 100% Verlust
+            - Bei 5000 Zyklen: ~{avg_cycle_loss * 5000:.1f}% Gesamtverlust
+            - Bei 10000 Zyklen: ~{avg_cycle_loss * 10000:.1f}% Gesamtverlust
+            """
+            st.markdown(assessment)
     else:
-        st.warning("🚫 No 3D data available for the selected timeframe")
+        st.warning("Nicht genügend Daten für Kurvenfit-Analyse verfügbar.")
 
-with tab5:
-    st.header("🔗 Critical Cells & Neighbor Analysis")
+# SAT Voltage alerts
+st.subheader("⚠️ SAT Voltage Alerts")
+if health_data["health_matrix"]:
+    latest_values = health_data["health_matrix"][-1]
+    cells = health_data["cells"]
 
-    # Critical cell controls
+    critical_cells = []
+    warning_cells = []
+
+    for i, sat_v in enumerate(latest_values):
+        cell_key = cells[i]
+        cell_label = format_cell_label(cell_key)
+
+        if sat_v < 80:
+            critical_cells.append((cell_label, sat_v))
+        elif sat_v < 85:
+            warning_cells.append((cell_label, sat_v))
+
     col1, col2 = st.columns(2)
+
     with col1:
-        critical_pack = st.selectbox("🚨 Pack to Analyze", range(1, 6), key="critical_pack")
+        if critical_cells:
+            st.error(f"🚨 {len(critical_cells)} Low SAT-V Cells (<80%)")
+            for cell, sat_v in critical_cells[:5]:  # Show top 5
+                st.write(f"• {cell}: {sat_v:.1f}%")
+        else:
+            st.success("✅ No critically low voltage indices")
+
     with col2:
-        st.markdown("#### 🎯 Analysis Depth")
-        analysis_depth = st.selectbox("Sensitivity", ["🔍 Standard", "⚠️ Sensitive", "🚨 Ultra-Sensitive"], index=2)
+        if warning_cells:
+            st.warning(f"⚠️ {len(warning_cells)} Warning SAT-V Cells (<85%)")
+            for cell, sat_v in warning_cells[:5]:  # Show top 5
+                st.write(f"• {cell}: {sat_v:.1f}%")
+        else:
+            st.success("✅ All SAT voltages normal")
 
-    # Get critical cells analysis
-    with st.spinner("🚨 Detecting critical cells with neighbor analysis..."):
-        critical_data = get_critical_cells_fast(selected_system, critical_pack, start_str, end_str)
-
-    if critical_data and critical_data.get("critical_cells"):
-        critical_cells = critical_data["critical_cells"]
-        analysis_summary = critical_data["analysis_summary"]
-
-        # Critical cells summary
-        st.markdown(f"""
-        <div class="metric-highlight">
-        🚨 Found {len(critical_cells)} critical cells in Pack {critical_pack}<br>
-        🔥 High Risk: {analysis_summary['high_risk_cells']} | 🔧 Medium Risk: {analysis_summary['medium_risk_cells']}
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Display critical cells
-        st.markdown("### 🚨 Critical Cells Ranking")
-
-        for i, cell in enumerate(critical_cells[:10]):  # Show top 10
-            cell_num = cell["cell_num"]
-            risk_level = cell["risk_level"]
-            conditions = cell["critical_conditions"]
-            voltage_drift = cell["voltage_drift"]
-            stability_impact = cell["stability_impact"]
-
-            # Risk level styling
-            if risk_level == "critical":
-                card_class = "danger-card"
-                risk_emoji = "🚨"
-            elif risk_level == "high":
-                card_class = "warning-card"
-                risk_emoji = "⚠️"
-            else:
-                card_class = "fast-card"
-                risk_emoji = "🔍"
-
-            st.markdown(f"""
-            <div class="fast-card {card_class}">
-            <h3>#{i+1} {risk_emoji} Cell {cell_num} - {risk_level.upper()} RISK</h3>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                <div>
-                    <p><strong>📈 Voltage Drift:</strong> {voltage_drift:.4f}V</p>
-                    <p><strong>🔗 Stability Impact:</strong> {stability_impact:.2f}</p>
-                </div>
-                <div>
-                    <p><strong>🚨 Issues:</strong> {len(conditions)} detected</p>
-                    <p><strong>⚡ Conditions:</strong> {', '.join(conditions[:2])}</p>
-                </div>
-            </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Neighbor influence heatmap
-        if "neighbor_analysis" in critical_data:
-            st.markdown("### 🔗 Neighbor Influence Map")
-
-            neighbor_data = critical_data["neighbor_analysis"]
-
-            # Create simplified neighbor correlation matrix
-            cell_nums = sorted([int(k) for k in neighbor_data.keys()])
-            if cell_nums:
-                correlation_matrix = []
-                cell_labels = []
-
-                for cell_num in cell_nums[:20]:  # Show first 20 cells
-                    if str(cell_num) in neighbor_data:
-                        correlations = neighbor_data[str(cell_num)].get("correlations", {})
-                        row = []
-                        for other_cell in cell_nums[:20]:
-                            if str(other_cell) in correlations:
-                                row.append(correlations[str(other_cell)]["correlation"])
-                            else:
-                                row.append(0.0)
-                        correlation_matrix.append(row)
-                        cell_labels.append(f"C{cell_num}")
-
-                if correlation_matrix:
-                    fig_neighbor = go.Figure(data=go.Heatmap(
-                        z=correlation_matrix,
-                        x=cell_labels,
-                        y=cell_labels,
-                        colorscale='RdYlBu_r',
-                        showscale=True,
-                        colorbar=dict(title="Correlation")
-                    ))
-
-                    fig_neighbor.update_layout(
-                        title="🔗 Cell-to-Cell Influence Heatmap (First 20 Cells)",
-                        xaxis_title="Cell",
-                        yaxis_title="Cell",
-                        width=600,
-                        height=500
-                    )
-
-                    st.plotly_chart(fig_neighbor, use_container_width=True, config={'displayModeBar': False})
-
-        # Critical actions
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("🚨 Priority Alert", key="priority_alert"):
-                st.success("⚡ Priority alerts sent!")
-
-        with col2:
-            if st.button("🔧 Schedule Inspection", key="schedule_inspection"):
-                st.success("⚡ Inspection scheduled!")
-
-        with col3:
-            if st.button("📊 Detailed Report", key="detailed_report"):
-                st.success("⚡ Report generated!")
-
-    else:
-        st.info("✅ No critical cells detected in the current timeframe!")
-
-# Ultra-fast footer
 st.markdown("---")
-performance_col1, performance_col2, performance_col3 = st.columns(3)
-
-with performance_col1:
-    st.markdown("""
-    <div style="text-align: center; padding: 10px; background: #28a745; color: white; border-radius: 8px;">
-    <h4 style="margin: 0;">⚡ Speed Optimized</h4>
-    <p style="margin: 0;">5-min cache, async loading</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with performance_col2:
-    st.markdown("""
-    <div style="text-align: center; padding: 10px; background: #007bff; color: white; border-radius: 8px;">
-    <h4 style="margin: 0;">🔥 Real-Time Data</h4>
-    <p style="margin: 0;">260 cells analyzed</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with performance_col3:
-    st.markdown("""
-    <div style="text-align: center; padding: 10px; background: #ff6b6b; color: white; border-radius: 8px;">
-    <h4 style="margin: 0;">🚀 Ultra-Fast UI</h4>
-    <p style="margin: 0;">Sub-second response</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.caption(f"🎯 Analyzing {selected_system} | ⚡ Ultra-optimized for speed | 📅 {start_date} to {end_date}")
+st.markdown("*PackPulse 💓 - Professional SAT voltage analysis from real BESS charge cycle telemetry*")

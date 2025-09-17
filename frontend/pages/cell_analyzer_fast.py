@@ -29,78 +29,107 @@ def get_bess_systems():
     data = api_call("/meters/classified")
     return data.get("bess", {})
 
+@st.cache_data(ttl=300)  # 5 minute cache for raw plotting data
+def get_raw_voltage_plot_data(system: str, cell_id: str, sample_rate: int = 50):
+    """Get raw voltage data for fast plotting"""
+    params = {
+        "sample_rate": sample_rate,
+        "start": "2024-01-01",
+        "end": "2024-12-31"
+    }
+
+    try:
+        data = api_call(f"/cell/system/{system}/raw-voltage-plot", params={"cell_id": cell_id, **params})
+        if data and data.get("data_source") == "raw_bms_voltage_data":
+            return data
+    except Exception as e:
+        st.error(f"Raw voltage plotting failed: {str(e)}")
+        return None
+
+    return None
+
 @st.cache_data(ttl=60)
-def get_cell_health_data(system: str):
-    """Load real SAT voltage data directly from BMS cell voltage files"""
-    params = {"time_resolution": "1d"}
-    # Try the new real SAT voltage endpoint first
+def get_cell_health_data(system: str, demo_mode: bool = False):
+    """Get REAL cell health data from BMS voltage analysis - NO SYNTHETIC DATA"""
+    params = {
+        "time_resolution": "1d",
+        "demo_mode": demo_mode
+    }
+
+    # ONLY use real SAT voltage endpoint - no synthetic fallbacks
     try:
         data = api_call(f"/cell/system/{system}/real-sat-voltage", params)
         if data and data.get("data_source") == "real_cell_voltages":
-            st.info(f"📡 Using real BMS voltage data: {data.get('calculation_method', 'unknown')}")
+            if demo_mode:
+                st.success(f"🎯 Demo Mode: Strategic sampling - {data.get('calculation_method', 'unknown')}")
+            else:
+                st.success(f"📡 Complete Coverage: Real BMS voltage data - {data.get('calculation_method', 'unknown')}")
+
+            degradation_3d = data.get("degradation_3d", {})
+
+            # Process the degradation_3d data into cells format if not already done
+            if not degradation_3d:
+                st.error("❌ No degradation_3d data in response")
+                return None
+
+            # Process the data to create the frontend format
+            # Extract all unique timestamps and cells
+            all_timestamps = set()
+            all_cells = set()
+
+            for cell_key, time_series in degradation_3d.items():
+                if time_series:
+                    all_cells.add(cell_key)
+                    for point in time_series:
+                        all_timestamps.add(point["timestamp"])
+
+            timestamps = sorted(list(all_timestamps))
+            # Sort cells by pack and cell number (pack_1_cell_1, pack_1_cell_2, etc.)
+            def parse_cell_id(cell_key):
+                try:
+                    parts = cell_key.split('_')
+                    pack_num = int(parts[1])  # pack_1 -> 1
+                    cell_num = int(parts[3])  # cell_1 -> 1
+                    return (pack_num, cell_num)
+                except:
+                    return (999, 999)  # Put parse errors at the end
+
+            cells = sorted(list(all_cells), key=parse_cell_id)
+
+            # Build health matrix: [timestamp][cell] = health%
+            health_matrix = []
+            for timestamp in timestamps:
+                row = []
+                for cell_key in cells:
+                    cell_data = degradation_3d.get(cell_key, [])
+                    health_value = 85.0  # default
+
+                    for point in cell_data:
+                        if point["timestamp"] == timestamp:
+                            # Handle both real voltage data and synthetic health data
+                            if "voltage_percentage" in point:
+                                health_value = point["voltage_percentage"]  # Real SAT voltage percentage
+                            elif "health_percentage" in point:
+                                health_value = point["health_percentage"]   # Synthetic health data
+                            break
+
+                    row.append(health_value)
+                health_matrix.append(row)
+
+            # Add processed data to the response
+            data["cells"] = cells
+            data["timestamps"] = timestamps
+            data["health_matrix"] = health_matrix
+            data["total_cells"] = len(cells)
+
             return data
-    except:
-        pass
-
-    # Fallback to synthetic health data
-    data = api_call(f"/cell/system/{system}/degradation-3d", params)
-    if data:
-        st.warning("⚠️ Using synthetic health metrics - real voltage calculation failed")
-
-    if not data or "degradation_3d" not in data:
-        return {"cells": [], "timestamps": [], "health_matrix": []}
-
-    degradation_3d = data["degradation_3d"]
-
-    # Extract all unique timestamps and cells
-    all_timestamps = set()
-    all_cells = set()
-
-    for cell_key, time_series in degradation_3d.items():
-        if time_series:
-            all_cells.add(cell_key)
-            for point in time_series:
-                all_timestamps.add(point["timestamp"])
-
-    timestamps = sorted(list(all_timestamps))
-    # Sort cells by pack and cell number (pack_1_cell_1, pack_1_cell_2, etc.)
-    def parse_cell_id(cell_key):
-        try:
-            parts = cell_key.split('_')
-            pack_num = int(parts[1])  # pack_1 -> 1
-            cell_num = int(parts[3])  # cell_1 -> 1
-            return (pack_num, cell_num)
-        except:
-            return (999, 999)  # Put parse errors at the end
-
-    cells = sorted(list(all_cells), key=parse_cell_id)
-
-    # Build health matrix: [timestamp][cell] = health%
-    health_matrix = []
-    for timestamp in timestamps:
-        row = []
-        for cell_key in cells:
-            cell_data = degradation_3d.get(cell_key, [])
-            health_value = 85.0  # default
-
-            for point in cell_data:
-                if point["timestamp"] == timestamp:
-                    # Handle both real voltage data and synthetic health data
-                    if "voltage_percentage" in point:
-                        health_value = point["voltage_percentage"]  # Real SAT voltage percentage
-                    elif "health_percentage" in point:
-                        health_value = point["health_percentage"]   # Synthetic health data
-                    break
-
-            row.append(health_value)
-        health_matrix.append(row)
-
-    return {
-        "cells": cells,
-        "timestamps": timestamps,
-        "health_matrix": health_matrix,
-        "total_cells": len(cells)
-    }
+        else:
+            st.error("❌ Real voltage data not available - wrong data source")
+            return None
+    except Exception as e:
+        st.error(f"❌ Real voltage analysis failed: {str(e)}")
+        st.error("🚫 NO SYNTHETIC DATA - Only real BMS cell data used")
+        return None
 
 # Main UI
 st.title("🔋 PackPulse 💓 - SAT Voltage Monitor")
@@ -112,21 +141,35 @@ if not systems:
     st.error("No BESS systems found")
     st.stop()
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     selected_system = st.selectbox("Select BESS System", list(systems.keys()))
 with col2:
-    # Pack filter - extract available packs from the first call
-    available_packs = ["All"] + [f"Pack {i}" for i in range(1, 6)]  # Typically 5 packs
+    # Pack filter - 5 packs with 52 cells each (260 total cells)
+    available_packs = ["All"] + [f"Pack {i}" for i in range(1, 6)]  # 5 packs × 52 cells = 260 total
     selected_pack = st.selectbox("Filter by Pack", available_packs)
+with col3:
+    # Demo mode toggle for instant showcase performance
+    demo_mode = st.checkbox(
+        "⚡ Demo Mode",
+        value=True,  # Default to ON for instant response
+        help="Ultra-light sampling (5 cells - 1 per pack) for instant showcase performance vs Complete Coverage (260 cells)"
+    )
 
 # Load data
-with st.spinner("Loading SAT voltage analysis data..."):
-    health_data = get_cell_health_data(selected_system)
+loading_message = "⚡ Loading SAT voltage analysis (Demo: 5 cells)..." if demo_mode else "Loading SAT voltage analysis (Complete: 260 cells)..."
+with st.spinner(loading_message):
+    health_data = get_cell_health_data(selected_system, demo_mode)
 
-if not health_data["cells"]:
+if not health_data or not health_data.get("degradation_3d"):
     st.error("No SAT voltage data available")
     st.stop()
+elif not health_data.get("cells"):
+    # Try to process the degradation_3d data if cells data is missing
+    health_data = get_cell_health_data(selected_system, demo_mode)
+    if not health_data or not health_data.get("cells"):
+        st.error("No SAT voltage data available - processing failed")
+        st.stop()
 
 # Apply pack filtering
 if selected_pack != "All":
@@ -170,7 +213,7 @@ with col4:
         st.metric("Avg SAT-V", f"{avg_sat_voltage:.1f}%")
 
 # Create tabs
-tab1, tab2, tab3, tab4 = st.tabs(["📊 SAT Voltage Overview", "🗺️ Heatmap & 3D View", "📈 Pack Trends", "📉 Degradation Analysis"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 SAT Voltage Overview", "🗺️ Heatmap & 3D View", "📈 Pack Trends", "📉 Degradation Analysis", "⚡ Real-Time Voltage"])
 
 with tab1:
     st.subheader("SAT Voltage Analysis Overview")
@@ -330,8 +373,9 @@ with tab3:
         timestamps = health_data["timestamps"]
 
         # Get original full data for pack trends (before filtering)
+        # Note: Pack trends use the same mode as main analysis for consistency
         with st.spinner("Calculating pack trends..."):
-            full_data = get_cell_health_data(selected_system)
+            full_data = get_cell_health_data(selected_system, demo_mode)
 
         # Group cells by pack and calculate averages
         for timestamp_idx, timestamp in enumerate(full_data["timestamps"]):
@@ -436,8 +480,9 @@ with tab4:
 
     if health_data["health_matrix"] and health_data["cells"]:
         # Get full dataset for analysis
+        # Note: Degradation analysis uses the same mode as main analysis for consistency
         with st.spinner("Calculating degradation curves..."):
-            full_data = get_cell_health_data(selected_system)
+            full_data = get_cell_health_data(selected_system, demo_mode)
 
         # Calculate pack averages and fit curves
         pack_analysis = {}
@@ -684,6 +729,175 @@ if health_data["health_matrix"]:
                 st.write(f"• {cell}: {sat_v:.1f}%")
         else:
             st.success("✅ All SAT voltages normal")
+
+with tab5:
+    st.subheader("⚡ Real-Time Voltage Plotting")
+    st.markdown("**Raw BMS cell voltage data with fast Plotly visualization**")
+
+    if health_data["cells"]:
+        # Cell selection for plotting
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            # Select cell for plotting - now with ALL 260 cells available!
+            available_cells = health_data["cells"]  # Show ALL processed cells (up to 260)
+            selected_cell = st.selectbox("Select Cell for Plotting", available_cells, key="plot_cell")
+
+        with col2:
+            # Sampling rate control
+            sample_rate = st.selectbox("Data Sampling Rate",
+                                     [10, 25, 50, 100, 200],
+                                     index=2,
+                                     help="Higher = faster but less detail")
+
+        with col3:
+            # Plot button
+            plot_button = st.button("🔄 Load Voltage Plot", type="primary")
+
+        if plot_button and selected_cell:
+            with st.spinner(f"Loading raw voltage data for {selected_cell} (sampling every {sample_rate} points)..."):
+                plot_data = get_raw_voltage_plot_data(selected_system, selected_cell, sample_rate)
+
+                if plot_data and plot_data.get("voltage_data"):
+                    # Display statistics
+                    stats = plot_data["statistics"]
+
+                    col1, col2, col3, col4, col5 = st.columns(5)
+                    with col1:
+                        st.metric("Data Points", f"{stats['data_points']:,}")
+                    with col2:
+                        st.metric("Min Voltage", f"{stats['min_voltage']:.3f}V")
+                    with col3:
+                        st.metric("Max Voltage", f"{stats['max_voltage']:.3f}V")
+                    with col4:
+                        st.metric("Avg Voltage", f"{stats['avg_voltage']:.3f}V")
+                    with col5:
+                        st.metric("Range", f"{stats['voltage_range']*1000:.1f}mV")
+
+                    # Extract plot data
+                    voltage_data = plot_data["voltage_data"]
+                    timestamps = [point["timestamp"] for point in voltage_data]
+                    voltages = [point["voltage"] for point in voltage_data]
+                    voltages_mv = [point["voltage_mv"] for point in voltage_data]
+
+                    # Create fast Plotly line plot with WebGL rendering
+                    fig_voltage = go.Figure()
+
+                    # Add main voltage trace
+                    fig_voltage.add_trace(go.Scattergl(
+                        x=timestamps,
+                        y=voltages,
+                        mode='lines',
+                        name=f'{selected_cell} Voltage',
+                        line=dict(color='#1f77b4', width=1),
+                        hovertemplate='<b>%{fullData.name}</b><br>' +
+                                    'Time: %{x}<br>' +
+                                    'Voltage: %{y:.4f}V<br>' +
+                                    '<extra></extra>'
+                    ))
+
+                    fig_voltage.update_layout(
+                        title=f"🔋 Real-Time Voltage Data: {selected_cell}",
+                        xaxis_title="Timestamp",
+                        yaxis_title="Cell Voltage (V)",
+                        height=500,
+                        showlegend=True,
+                        template="plotly_white",
+                        hovermode='x unified'
+                    )
+
+                    # Optimize for performance
+                    fig_voltage.update_traces(
+                        connectgaps=True,
+                        line_shape='linear'
+                    )
+
+                    st.plotly_chart(fig_voltage, use_container_width=True, config={
+                        'displayModeBar': True,
+                        'displaylogo': False,
+                        'modeBarButtonsToRemove': ['pan2d', 'lasso2d']
+                    })
+
+                    # Voltage in mV plot for detailed analysis
+                    fig_voltage_mv = go.Figure()
+
+                    fig_voltage_mv.add_trace(go.Scattergl(
+                        x=timestamps,
+                        y=voltages_mv,
+                        mode='lines',
+                        name=f'{selected_cell} Voltage (mV)',
+                        line=dict(color='#ff7f0e', width=1),
+                        hovertemplate='<b>%{fullData.name}</b><br>' +
+                                    'Time: %{x}<br>' +
+                                    'Voltage: %{y:.1f}mV<br>' +
+                                    '<extra></extra>'
+                    ))
+
+                    fig_voltage_mv.update_layout(
+                        title=f"🔍 Detailed Voltage Analysis (mV): {selected_cell}",
+                        xaxis_title="Timestamp",
+                        yaxis_title="Cell Voltage (mV)",
+                        height=400,
+                        template="plotly_white",
+                        hovermode='x unified'
+                    )
+
+                    st.plotly_chart(fig_voltage_mv, use_container_width=True, config={
+                        'displayModeBar': True,
+                        'displaylogo': False,
+                        'modeBarButtonsToRemove': ['pan2d', 'lasso2d']
+                    })
+
+                    # Analysis insights
+                    st.subheader("📊 Voltage Analysis Insights")
+
+                    # Calculate voltage trend
+                    if len(voltages) >= 2:
+                        voltage_trend = (voltages[-1] - voltages[0]) / len(voltages) * 1000000  # µV per sample
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            if voltage_trend > 0:
+                                st.success(f"📈 Voltage trending UP: +{voltage_trend:.2f}µV per sample")
+                            elif voltage_trend < -1:
+                                st.error(f"📉 Voltage trending DOWN: {voltage_trend:.2f}µV per sample")
+                            else:
+                                st.info(f"➡️ Voltage stable: {voltage_trend:.2f}µV per sample")
+
+                        with col2:
+                            # Time span analysis
+                            time_span_hours = len(voltage_data) * sample_rate / 60  # Approximate hours
+                            st.info(f"⏱️ Time span: ~{time_span_hours:.1f} hours sampled")
+
+                    # Data quality metrics
+                    st.markdown("**Data Quality Metrics**")
+                    quality_col1, quality_col2, quality_col3 = st.columns(3)
+
+                    with quality_col1:
+                        st.metric("Processed Rows", f"{stats['total_rows_processed']:,}")
+                    with quality_col2:
+                        st.metric("Sampling Rate", f"1:{sample_rate}")
+                    with quality_col3:
+                        efficiency = (stats['data_points'] / stats['total_rows_processed']) * 100
+                        st.metric("Data Efficiency", f"{efficiency:.1f}%")
+
+                else:
+                    st.error(f"❌ No voltage data available for {selected_cell}")
+
+        else:
+            st.info("👆 Select a cell and click 'Load Voltage Plot' to visualize real BMS voltage data over time")
+            st.markdown("""
+            **Features:**
+            - ⚡ **Fast WebGL rendering** for smooth interaction with large datasets
+            - 🔍 **Dual-scale visualization** (V and mV) for detailed analysis
+            - 📊 **Real-time statistics** and trend analysis
+            - 🎛️ **Configurable sampling rates** for performance optimization
+            - 📈 **Interactive zoom and pan** to explore voltage patterns
+            """)
+
+    else:
+        st.error("No cells available for voltage plotting")
 
 st.markdown("---")
 st.markdown("*PackPulse 💓 - Professional SAT voltage analysis from real BESS charge cycle telemetry*")

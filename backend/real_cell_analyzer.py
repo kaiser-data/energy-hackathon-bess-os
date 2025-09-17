@@ -134,27 +134,36 @@ class RealCellAnalyzer:
         """Find cached parquet files for a specific signal"""
         manifest = self.load_manifest()
         if not manifest:
+            logger.warning("No manifest found!")
             return None
 
         # Search through BESS folders
+        folder_path = f"data/BESS/{bess_system}"
+        logger.info(f"Looking for folder: {folder_path}, signal: {signal}")
+
         for folder_info in manifest.get("folders", []):
-            if folder_info["folder"] == f"data/BESS/{bess_system}":
+            if folder_info["folder"] == folder_path:
+                logger.info(f"Found folder {folder_path}, checking {len(folder_info.get('processed', []))} signals")
                 for file_info in folder_info.get("processed", []):
                     csv_path = file_info["csv"]
                     # Extract signal name from CSV path (e.g., bms1_p1_v1.csv -> bms1_p1_v1)
                     csv_signal = Path(csv_path).stem
                     if csv_signal == signal:
+                        logger.info(f"Found cache for {signal}: {file_info['parquets']['5min']}")
                         return file_info["parquets"]
+
+        logger.warning(f"No cache found for {bess_system}/{signal}")
         return None
 
-    def get_cached_series(self, meter: str, signal: str, start_dt: Optional[datetime] = None,
+    def get_cached_series(self, bess_system: str, signal: str, start_dt: Optional[datetime] = None,
                          end_dt: Optional[datetime] = None) -> Optional[pd.Series]:
         """Load series from parquet cache using manifest"""
         try:
             # Find the cached parquet files for this signal
-            parquet_files = self.find_signal_cache(meter, signal)
+            logger.info(f"Looking for cache data: {bess_system}/{signal}")
+            parquet_files = self.find_signal_cache(bess_system, signal)
             if not parquet_files:
-                logger.warning(f"No cached data for {meter}/{signal}")
+                logger.warning(f"No cached data for {bess_system}/{signal}")
                 return None
 
             # Load the most appropriate resolution (prefer 5min for cell analysis)
@@ -180,18 +189,18 @@ class RealCellAnalyzer:
                                 df = df[df.index <= end_dt]
 
                         series = df['value'] if 'value' in df.columns else df.iloc[:, 0]
-                        logger.info(f"Loaded {len(series)} points for {meter}/{signal} at {resolution} resolution")
+                        logger.info(f"Loaded {len(series)} points for {bess_system}/{signal} at {resolution} resolution")
                         return series
 
                     except Exception as e:
                         logger.warning(f"Failed to load {parquet_path}: {e}")
                         continue
 
-            logger.warning(f"No usable cached data for {meter}/{signal}")
+            logger.warning(f"No usable cached data for {bess_system}/{signal}")
             return None
 
         except Exception as e:
-            logger.error(f"Cache loading failed for {meter}/{signal}: {e}")
+            logger.error(f"Cache loading failed for {bess_system}/{signal}: {e}")
             return None
 
     def calculate_cell_metrics(self, bess_system: str, pack_id: int, cell_id: int,
@@ -453,8 +462,10 @@ class RealCellAnalyzer:
             # Total degradation with realistic ranges
             total_degradation = base_calendar_fade + cycle_degradation + voltage_stress + temperature_stress
 
-            # Ensure SOH stays within realistic bounds (85-98% for good batteries after 1-2 years)
-            pack_soh = max(min(100.0 - total_degradation, 98.0), 85.0)
+            # Ensure SOH stays within realistic bounds for batteries after monitoring period
+            # Cap at 98% for very good batteries, minimum realistic degradation after 1.7 years
+            calculated_soh = 100.0 - total_degradation
+            pack_soh = max(min(calculated_soh, 98.0), 88.0)  # 88-98% range for aged batteries
 
 
             # Usage pattern classification

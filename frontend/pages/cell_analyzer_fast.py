@@ -16,9 +16,12 @@ st.set_page_config(page_title="🔋 PackPulse 💓 - SAT Voltage Monitor", layou
 def api_call(endpoint, params=None):
     """Simple API call with error handling"""
     try:
-        response = requests.get(f"{API_URL}{endpoint}", params=params or {}, timeout=30)
+        response = requests.get(f"{API_URL}{endpoint}", params=params or {}, timeout=60)
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.Timeout:
+        st.error(f"⏱️ Request timeout for {endpoint} - try demo mode for faster response")
+        return {}
     except Exception as e:
         st.error(f"API Error: {e}")
         return {}
@@ -310,6 +313,44 @@ with tab2:
         st.subheader("3D Surface View")
         st.markdown("**Interactive 3D visualization of SAT voltage degradation across cells and time**")
 
+        # Voltage range controls for better visualization
+        col1, col2, col3 = st.columns([1, 1, 2])
+
+        # Get data range for sensible defaults
+        data_min = float(df_heatmap.values.min())
+        data_max = float(df_heatmap.values.max())
+
+        with col1:
+            vsat_min = st.number_input(
+                "VSAT Min (%)",
+                min_value=80.0,
+                max_value=105.0,
+                value=max(80.0, data_min - 2.0),
+                step=0.5,
+                help="Set minimum voltage range for better 3D visualization"
+            )
+
+        with col2:
+            vsat_max = st.number_input(
+                "VSAT Max (%)",
+                min_value=80.0,
+                max_value=105.0,
+                value=min(105.0, data_max + 2.0),
+                step=0.5,
+                help="Set maximum voltage range for better 3D visualization"
+            )
+
+        with col3:
+            st.info(f"📊 **Data Range:** {data_min:.1f}% to {data_max:.1f}%")
+            if st.button("🔄 Reset Range", help="Reset to auto-calculated range"):
+                st.rerun()
+
+        # Validate range
+        if vsat_min >= vsat_max:
+            st.warning("⚠️ Minimum voltage must be less than maximum voltage")
+            vsat_min = data_min - 1
+            vsat_max = data_max + 1
+
         # Create 3D surface plot
         fig_3d = go.Figure(data=[
             go.Surface(
@@ -318,6 +359,8 @@ with tab2:
                 y=list(range(len(df_heatmap.index))),
                 colorscale="RdYlGn",
                 colorbar=dict(title="SAT-V %"),
+                cmin=vsat_min,
+                cmax=vsat_max,
                 hovertemplate="<b>%{text}</b><br>Date: %{customdata[0]}<br>SAT Voltage: %{z:.1f}%<extra></extra>",
                 text=[[df_heatmap.columns[j] for j in range(len(df_heatmap.columns))]
                       for i in range(len(df_heatmap.index))],
@@ -348,7 +391,7 @@ with tab2:
                 ),
                 zaxis=dict(
                     title="SAT Voltage %",
-                    range=[df_heatmap.values.min()-1, df_heatmap.values.max()+1]
+                    range=[vsat_min, vsat_max]
                 ),
                 camera=dict(
                     eye=dict(x=1.4, y=1.4, z=0.8)
@@ -373,9 +416,8 @@ with tab3:
         timestamps = health_data["timestamps"]
 
         # Get original full data for pack trends (before filtering)
-        # Note: Pack trends use the same mode as main analysis for consistency
-        with st.spinner("Calculating pack trends..."):
-            full_data = get_cell_health_data(selected_system, demo_mode)
+        # Use cached data for trends (no need to reload)
+        full_data = health_data
 
         # Group cells by pack and calculate averages
         for timestamp_idx, timestamp in enumerate(full_data["timestamps"]):
@@ -480,9 +522,8 @@ with tab4:
 
     if health_data["health_matrix"] and health_data["cells"]:
         # Get full dataset for analysis
-        # Note: Degradation analysis uses the same mode as main analysis for consistency
-        with st.spinner("Calculating degradation curves..."):
-            full_data = get_cell_health_data(selected_system, demo_mode)
+        # Use cached data for degradation analysis (no need to reload)
+        full_data = health_data
 
         # Calculate pack averages and fit curves
         pack_analysis = {}

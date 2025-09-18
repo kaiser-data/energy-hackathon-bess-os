@@ -2,6 +2,10 @@
 
 **Professional-grade analytics platform for smart meter and Battery Energy Storage System (BESS) data visualization, degradation monitoring, and predictive analysis.**
 
+🏆 **[Berlin Energy Hackathon - MaxxWatt Challenge](https://github.com/Viktoria-MaxxWatt/Berlin_Energy_Hackathon_MaxxWatt_Challenge)**
+
+![Berlin Energy Hackathon](docs/images/BerlinEnergyHackathon_Logo.png)
+
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-green.svg)](https://fastapi.tiangolo.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28.1-red.svg)](https://streamlit.io/)
@@ -104,35 +108,20 @@ streamlit run app.py
 #### 📈 Single Meter Dashboard
 *Advanced power analytics and energy consumption analysis*
 
-![Single Meter Dashboard](docs/images/single_meter_dashboard.png)
+![Single Meter Dashboard](docs/images/Singlemeter.png)
 *Real-time power monitoring with daily energy consumption breakdown*
-
-#### ⚡ Compare Meters Dashboard
-*Side-by-side meter comparison with overlay analysis*
-
-![Compare Meters](docs/images/compare_meters.png)
-*Comparative analysis revealing consumption patterns and anomalies*
 
 #### 🔋 BESS Overview Dashboard
 *Comprehensive battery system KPIs and telemetry monitoring*
 
-![BESS Overview](docs/images/bess_overview.png)
+![BESS Overview](docs/images/BESS_overview.png)
 *Real-time SOC, SOH, thermal, and PCS metrics with alarm monitoring*
 
 #### 💓 PackPulse - Professional SAT Voltage Analysis
 *Industry-leading cell degradation monitoring platform*
 
-![PackPulse Overview](docs/images/packpulse_overview.png)
-*System-wide voltage patterns with pack selection and time range filtering*
-
-![PackPulse Heatmaps](docs/images/packpulse_heatmaps.png)
-*Color-coded voltage distribution across all 260 cells revealing degradation patterns*
-
-![PackPulse Trends](docs/images/packpulse_trends.png)
-*Pack-level degradation analysis with statistical quality assessment*
-
-![PackPulse Analysis](docs/images/packpulse_analysis.png)
-*Advanced curve fitting with R² correlation and lifetime projections*
+![PackPulse 3D Analysis](docs/images/VSAT_%203dPLot.png)
+*Advanced 3D SAT voltage surface visualization showing degradation patterns across cells and time*
 
 ## 🚀 Advanced Caching & Performance Architecture
 

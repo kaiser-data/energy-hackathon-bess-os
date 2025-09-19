@@ -21,7 +21,7 @@
 
 **Our Solution**: Professional SAT (saturation) voltage analysis using real electrical measurements from 260 individual cells, providing:
 - **Precise Degradation Tracking**: Direct voltage measurements vs. estimated health percentages
-- **Predictive Analytics**: Statistical modeling for lifetime estimation (5000/10000 cycles)
+- **Future Predictive Potential**: Foundation for statistical modeling using observed linear behavior and cycle patterns
 - **Early Observation**: Long-term degradation monitoring with low impact on system operations
 - **Financial Impact**: Optimize replacement schedules, warranty claims, and performance guarantees
 
@@ -399,11 +399,11 @@ GET /cell/system/{bess_system}/real-sat-voltage
 3. **Linear Degradation**: Surprisingly consistent linear degradation behavior observed
 4. **Limited Sample**: Three BESS systems provide initial insights - more data needed for validation
 
-#### 🎯 Predictive Analytics Results
-**Statistical modeling from our dataset**:
-- **R² Correlation**: 0.89-0.97 across packs (excellent linear degradation)
-- **Annual Loss Rate**: 2.1% - 4.7% per year (varies by pack position)
-- **Cycle Life Projection**: 5,000-8,500 cycles to 80% capacity
+#### 🎯 Future Predictive Analytics Potential
+**Areas for statistical modeling development**:
+- **Linear Behavior**: Observed surprisingly linear degradation provides good foundation for modeling
+- **Shape Analysis**: Cell voltage curve shapes could reveal additional degradation indicators
+- **Cycle Patterns**: Charge cycle frequency patterns offer potential for enhanced prediction accuracy
 - **Financial Impact**: Significant savings potential through optimized replacement scheduling and early degradation detection
 
 ### 💾 Advanced Persistent Cache System

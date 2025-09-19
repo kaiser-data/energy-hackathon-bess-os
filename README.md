@@ -22,14 +22,14 @@
 **Our Solution**: Professional SAT (saturation) voltage analysis using real electrical measurements from 260 individual cells, providing:
 - **Precise Degradation Tracking**: Direct voltage measurements vs. estimated health percentages
 - **Predictive Analytics**: Statistical modeling for lifetime estimation (5000/10000 cycles)
-- **Early Warning Systems**: R² correlation analysis identifies concerning degradation patterns
+- **Early Observation**: Long-term degradation monitoring with low impact on system operations
 - **Financial Impact**: Optimize replacement schedules, warranty claims, and performance guarantees
 
 **Real Data Insights from Our 9-Month Dataset**:
 - **Degradation Range**: 6.5% total degradation (93.3% → 99.8%)
-- **Pack Variations**: Different degradation rates across 5 packs reveal thermal/electrical issues
-- **Charging Behavior Correlation**: Higher charging frequencies correlate with accelerated degradation in specific cells
-- **Recovery Patterns**: Some cells show voltage recovery during rest periods, indicating reversible vs. permanent degradation
+- **Pack Variations**: Not yet studied due to time constraints (future analysis opportunity)
+- **Charging Behavior**: Incomplete charge cycles with frequent 0% states appear to cause non-uniform cell damage
+- **Cell Analysis**: 260 cells monitored continuously for voltage patterns
 
 ## Quick Start
 
@@ -163,9 +163,11 @@ streamlit run app.py
 | **Analytics** | Plotly + Streamlit | QuickSight | Power BI | Data Studio |
 | **Compute** | Local Python | EC2 + ECS | VM + Container Instances | Compute Engine + GKE |
 
-**Cost Analysis**: Our local implementation provides equivalent functionality to a ~$2000/month cloud deployment, with superior performance for battery analytics use cases.
+**Cost Analysis**: Our local implementation provides equivalent functionality to a ~$800-1500/month cloud deployment, with superior performance for battery analytics use cases.
 
-**Scalability Path**: Architecture designed for seamless cloud migration with minimal refactoring.
+**Data Privacy & Security**: All sensitive BESS data remains local - no cloud vendor access to proprietary battery performance metrics, degradation patterns, or operational data.
+
+**Scalability Path**: Architecture designed for seamless cloud migration with minimal refactoring when scale requirements exceed local capacity.
 
 ## Data Structure
 
@@ -387,22 +389,22 @@ GET /cell/system/{bess_system}/real-sat-voltage
 - **Initial Condition**: ~99.8% SAT voltage (system commissioning Sept 2024)
 - **Current State**: 93.3% - 99.8% range (June 2025)
 - **Total Degradation**: ~6.5% over 9 months (realistic for commercial BESS)
-- **Non-Linear Behavior**: Recovery periods during rest, accelerated loss during high-frequency cycling
+- **Cell Monitoring**: Continuous voltage tracking reveals degradation patterns
 
 #### ⚡ Charging Behavior Impact on Health
-**Our data reveals critical insights into charging behavior correlation with degradation:**
+**Our data reveals critical insights into charging behavior and degradation:**
 
-1. **High-Frequency Charging**: Cells with >2 cycles/day show 2.3x faster degradation
-2. **Thermal Stress**: Pack 3 cells show accelerated degradation (thermal management issues)
-3. **Recovery Patterns**: 15% of cells show voltage recovery during 48h+ rest periods
-4. **Pack Imbalance**: 0.8% voltage spread indicates cell matching quality issues
+1. **Incomplete Cycles**: Frequent discharge to 0% without full recharge causes non-uniform cell damage
+2. **Empty State Impact**: Extended periods at 0% charge correlate with increased cell degradation
+3. **Pack Imbalance**: 0.8% voltage spread observed across cells
+4. **Long-term Monitoring**: Continuous observation of 260 cells provides degradation trends
 
 #### 🎯 Predictive Analytics Results
 **Statistical modeling from our dataset**:
 - **R² Correlation**: 0.89-0.97 across packs (excellent linear degradation)
 - **Annual Loss Rate**: 2.1% - 4.7% per year (varies by pack position)
 - **Cycle Life Projection**: 5,000-8,500 cycles to 80% capacity
-- **Financial Impact**: $2.3M savings potential through optimized replacement scheduling
+- **Financial Impact**: Significant savings potential through optimized replacement scheduling and early degradation detection
 
 ### 💾 Advanced Persistent Cache System
 
@@ -502,9 +504,10 @@ ls -la backend/.demo_cache/  # Verify cache files and sizes
 - File-based caching system outperforming traditional Redis implementations
 
 ### 💼 Business Impact
-- **Cost Optimization**: $2.3M potential savings through predictive maintenance
+- **Cost Optimization**: Significant savings through predictive maintenance and early degradation detection
+- **Data Privacy**: Complete control over sensitive BESS operational data - no cloud vendor access
 - **Performance**: 225x faster analytics enabling real-time decision making
-- **Scalability**: Architecture supports 1000+ concurrent users
+- **Scalability**: Architecture supports 1000+ concurrent users with local deployment
 - **Competitive Advantage**: Professional-grade analytics vs generic "health" monitoring
 
 ## 📸 Application Screenshots

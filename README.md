@@ -9,7 +9,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-green.svg)](https://fastapi.tiangolo.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28.1-red.svg)](https://streamlit.io/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Commercial](https://img.shields.io/badge/License-Commercial-blue.svg)]()
 
 > **Professional Note**: This platform enables long-term monitoring and safe work activity of BESS systems through advanced data engineering, real-time analytics, and production-ready optimization techniques. Built with enterprise-scale performance in mind, featuring sub-second response times for 260-cell battery analysis through intelligent caching strategies.
 
@@ -515,4 +515,10 @@ ls -la backend/.demo_cache/  # Verify cache files and sizes
 *Screenshots showcase the professional interface design and advanced analytics capabilities. Each dashboard demonstrates different aspects of the platform's comprehensive monitoring and analysis features.*
 
 ## License
+
+**Commercial License** - All rights reserved.
+
+This software is proprietary and confidential. Unauthorized copying, distribution, or modification is strictly prohibited. For licensing inquiries and commercial use, please contact the development team.
+
+**Demo/Evaluation Use**: This code may be used for evaluation purposes only. Any commercial deployment or production use requires a valid commercial license.
 

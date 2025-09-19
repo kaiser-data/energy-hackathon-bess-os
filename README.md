@@ -9,7 +9,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-green.svg)](https://fastapi.tiangolo.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28.1-red.svg)](https://streamlit.io/)
-[![License: Commercial](https://img.shields.io/badge/License-Commercial-blue.svg)]()
+[![License: CC BY-NC](https://img.shields.io/badge/License-CC%20BY--NC-blue.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 
 > **Professional Note**: This platform enables long-term monitoring and safe work activity of BESS systems through advanced data engineering, real-time analytics, and production-ready optimization techniques. Built with enterprise-scale performance in mind, featuring sub-second response times for 260-cell battery analysis through intelligent caching strategies.
 
@@ -516,9 +516,21 @@ ls -la backend/.demo_cache/  # Verify cache files and sizes
 
 ## License
 
-**Commercial License** - All rights reserved.
+**Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**
 
-This software is proprietary and confidential. Unauthorized copying, distribution, or modification is strictly prohibited. For licensing inquiries and commercial use, please contact the development team.
+This project was developed for the Berlin Energy Hackathon and is shared for educational and research purposes.
 
-**Demo/Evaluation Use**: This code may be used for evaluation purposes only. Any commercial deployment or production use requires a valid commercial license.
+### You are free to:
+- **Share** — copy and redistribute the material in any medium or format
+- **Adapt** — remix, transform, and build upon the material
+
+### Under the following terms:
+- **Attribution** — You must give appropriate credit and provide a link to the license
+- **NonCommercial** — You may not use the material for commercial purposes
+- **No additional restrictions** — You may not apply legal terms that legally restrict others from doing anything the license permits
+
+### Commercial Use
+For commercial licensing and deployment, please contact the development team. Commercial applications require a separate license agreement.
+
+**Hackathon Heritage**: This code reflects the innovative spirit of hackathon development - feel free to learn from it, improve upon it, and use it for educational purposes!
 

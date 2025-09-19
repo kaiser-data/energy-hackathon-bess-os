@@ -11,7 +11,7 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28.1-red.svg)](https://streamlit.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Hiring Note**: This platform demonstrates advanced data engineering, real-time analytics, and production-ready optimization techniques. Built with enterprise-scale performance in mind, featuring sub-second response times for 260-cell battery analysis through intelligent caching strategies.
+> **Professional Note**: This platform enables long-term monitoring and safe work activity of BESS systems through advanced data engineering, real-time analytics, and production-ready optimization techniques. Built with enterprise-scale performance in mind, featuring sub-second response times for 260-cell battery analysis through intelligent caching strategies.
 
 ## 🚀 Why This Platform Matters
 
@@ -479,7 +479,7 @@ ls -la backend/.demo_cache/  # Verify cache files and sizes
 - **Scalability**: Horizontal scaling ready, cloud migration path defined
 - **Reliability**: Graceful degradation, error handling, automatic recovery
 
-## 👥 For Hiring Managers & Technical Teams
+## 👥 For Technical Teams & BESS Operations
 
 ### 🎯 This Platform Demonstrates
 

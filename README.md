@@ -25,11 +25,11 @@
 - **Early Observation**: Long-term degradation monitoring with low impact on system operations
 - **Financial Impact**: Optimize replacement schedules, warranty claims, and performance guarantees
 
-**Real Data Insights from Our 9-Month Dataset**:
-- **Degradation Range**: 6.5% total degradation (93.3% → 99.8%)
-- **Pack Variations**: Not yet studied due to time constraints (future analysis opportunity)
-- **Charging Behavior**: Incomplete charge cycles with frequent 0% states appear to cause non-uniform cell damage
-- **Cell Analysis**: 260 cells monitored continuously for voltage patterns
+**Real Data Insights from Our 20-Month Dataset**:
+- **SOC Performance**: SOC remained stable at 100% throughout monitoring period
+- **Module Degradation**: Clear degradation patterns observed in modules after incorrect charging protocols
+- **Linear Degradation**: Surprisingly linear total health degradation observed across checked range
+- **Sample Size**: Three BESS systems analyzed - larger dataset needed for comprehensive conclusions
 
 ## Quick Start
 
@@ -383,21 +383,21 @@ GET /cell/system/{bess_system}/real-sat-voltage
 
 **The Science**: SAT (saturation) voltage represents the maximum voltage achieved during charge cycles - the most sensitive indicator of lithium-ion battery health. Unlike generic "health" percentages, SAT voltage provides direct electrical measurements that correlate with actual capacity loss.
 
-**Real Data Correlations from Our 9-Month Dataset**:
+**Real Data Correlations from Our 20-Month Dataset**:
 
 #### 📉 Degradation Patterns Revealed
-- **Initial Condition**: ~99.8% SAT voltage (system commissioning Sept 2024)
-- **Current State**: 93.3% - 99.8% range (June 2025)
-- **Total Degradation**: ~6.5% over 9 months (realistic for commercial BESS)
-- **Cell Monitoring**: Continuous voltage tracking reveals degradation patterns
+- **SOC Stability**: SOC maintained at 100% throughout 20-month monitoring period
+- **Module Health**: Clear degradation in specific modules following incorrect charging protocols
+- **Linear Behavior**: Surprisingly linear total health degradation across monitored range
+- **Data Limitations**: Analysis based on three BESS systems - larger sample needed for statistical significance
 
-#### ⚡ Charging Behavior Impact on Health
-**Our data reveals critical insights into charging behavior and degradation:**
+#### ⚡ Charging Protocol Impact on Health
+**Our data reveals critical insights into charging protocol effects:**
 
-1. **Incomplete Cycles**: Frequent discharge to 0% without full recharge causes non-uniform cell damage
-2. **Empty State Impact**: Extended periods at 0% charge correlate with increased cell degradation
-3. **Pack Imbalance**: 0.8% voltage spread observed across cells
-4. **Long-term Monitoring**: Continuous observation of 260 cells provides degradation trends
+1. **Incorrect Charging**: Wrong charging protocols clearly caused module degradation patterns
+2. **SOC Stability**: Proper charging maintained SOC at 100% over 20-month period
+3. **Linear Degradation**: Surprisingly consistent linear degradation behavior observed
+4. **Limited Sample**: Three BESS systems provide initial insights - more data needed for validation
 
 #### 🎯 Predictive Analytics Results
 **Statistical modeling from our dataset**:

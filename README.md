@@ -532,5 +532,7 @@ This project was developed for the Berlin Energy Hackathon and is shared for edu
 ### Commercial Use
 For commercial licensing and deployment, please contact the development team at martinkaiser.bln@gmail.com. Commercial applications require a separate license agreement.
 
+**Special Note**: MaxxWatt (hackathon organizer) has a free license to use this project for any purpose.
+
 **Hackathon Heritage**: This code reflects the innovative spirit of hackathon development - feel free to learn from it, improve upon it, and use it for educational purposes!
 

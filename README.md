@@ -514,6 +514,31 @@ ls -la backend/.demo_cache/  # Verify cache files and sizes
 
 *Screenshots showcase the professional interface design and advanced analytics capabilities. Each dashboard demonstrates different aspects of the platform's comprehensive monitoring and analysis features.*
 
+## 📋 Requirements
+
+All backend and frontend dependencies are consolidated in the main `requirements.txt`:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Key Dependencies
+- **Backend**: FastAPI, uvicorn, pandas, numpy, pyarrow
+- **Frontend**: Streamlit, plotly, requests
+- **Performance**: uvloop, compression libraries (snappy, lz4, zstandard)
+- **Development**: black, ruff, mypy, pytest
+- **Monitoring**: memory-profiler, psutil
+
+### Installation
+```bash
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install all dependencies
+pip install -r requirements.txt
+```
+
 ## License
 
 **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**
